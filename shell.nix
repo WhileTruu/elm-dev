@@ -21,6 +21,8 @@ mkShell {
     yarn
     # Needed for building GHC
     llvmPackages_13.llvm
+    # GHC
+    stack
     # Other
     git
   ];
