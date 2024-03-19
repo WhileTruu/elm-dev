@@ -5,6 +5,7 @@ module Ext.CompileProxy
   ( loadSingle,
     SingleFileResult (..),
     loadFileSource,
+    loadPkgFileSource,
     loadCanonicalizeEnv,
     loadProject,
     allPackageArtifacts,
@@ -170,6 +171,16 @@ loadFileSource root path = do
   Dir.withCurrentDirectory root $ do
     source <- File.readUtf8 path
     case Parse.fromByteString Parse.Application source of
+      Right modul -> do
+        pure $ Right (source, modul)
+      Left err ->
+        pure $ Left err
+
+loadPkgFileSource :: Pkg.Name -> FilePath -> FilePath -> IO (Either Reporting.Error.Syntax.Error (BS.ByteString, Src.Module))
+loadPkgFileSource name root path = do
+  Dir.withCurrentDirectory root $ do
+    source <- File.readUtf8 path
+    case Parse.fromByteString (Parse.Package name) source of
       Right modul -> do
         pure $ Right (source, modul)
       Left err ->

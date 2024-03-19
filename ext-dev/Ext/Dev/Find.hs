@@ -44,6 +44,10 @@ import qualified Util
 import qualified Watchtower.Editor
 import qualified Ext.Dev.Find.Canonical
 import qualified Ext.Dev.Project
+import qualified Stuff
+import qualified System.FilePath as Path
+import qualified Ext.Dev.Package
+
 {- Find Definition -}
 
 definition :: FilePath -> Watchtower.Editor.PointLocation -> IO Json.Encode.Value
@@ -122,7 +126,32 @@ definition root (Watchtower.Editor.PointLocation path point) = do
 
           case Ext.Dev.Project.lookupModulePath details (ModuleName._module canMod) of
             Nothing ->
-               pure Json.Encode.null
+              case Ext.Dev.Project.lookupPkgName details (ModuleName._module canMod) of
+                Nothing ->
+                  pure Json.Encode.null
+
+                Just pkgName -> do
+                  maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
+
+                  case maybeCurrentVersion of
+                    Nothing ->
+                      pure Json.Encode.null
+
+                    Just version -> do
+                      packageCache <- Stuff.getPackageCache
+                      let home = Stuff.package packageCache pkgName version
+                      let path = home Path.</> "src" Path.</> ModuleName.toFilePath (ModuleName._module canMod) Path.<.> "elm"
+                      loadedFile <- Ext.CompileProxy.loadPkgFileSource pkgName home path
+
+                      case loadedFile of
+                        Right (_, sourceMod) -> do
+                          listAccess sourceMod
+                            & findFn name
+                            & encodeResult path
+                            & pure
+
+                        Left err -> do
+                             pure Json.Encode.null
 
             Just targetPath -> do
               loadedFile <- Ext.CompileProxy.loadFileSource root targetPath
@@ -132,7 +161,7 @@ definition root (Watchtower.Editor.PointLocation path point) = do
                     & findFn name
                     & encodeResult targetPath
                     & pure
-                
+
                 Left _ ->
                      pure Json.Encode.null
 

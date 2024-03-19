@@ -7,6 +7,7 @@ module Ext.Dev.Project
   , defaultImports
   , lookupModulePath
   , lookupModuleName
+  , lookupPkgName
   , getRoot
   , contains
   , discover, decodeProject, Project (..), encodeProjectJson, equal
@@ -35,7 +36,7 @@ import qualified Json.String
 import qualified Elm.Outline
 import qualified Elm.Details
 import qualified Elm.ModuleName as ModuleName
-
+import qualified Elm.Package as Pkg
 
 defaultImports :: Set.Set ModuleName.Raw
 defaultImports =
@@ -64,6 +65,15 @@ lookupModulePath details canModuleName =
     & Map.lookup canModuleName
     & fmap Elm.Details._path
 
+{-|
+  ModuelName -> Pkg.Name
+-}
+lookupPkgName :: Elm.Details.Details -> ModuleName.Raw -> Maybe Pkg.Name
+lookupPkgName details canModuleName =
+  details
+    & Elm.Details._foreigns
+    & Map.lookup canModuleName
+    & fmap (\(Elm.Details.Foreign name_ _) -> name_)
 
 {-|
   Path -> ModuleName
