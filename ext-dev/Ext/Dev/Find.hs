@@ -111,6 +111,9 @@ definition root (Watchtower.Editor.PointLocation path point) = do
                 Right (Can.TType extCanMod name _) ->
                   findExternalWith findFirstTypeNamed name id extCanMod
 
+                Right (Can.TAlias extCanMod name _ _) -> do
+                  findExternalWith findFirstTypeNamed name id extCanMod
+
                 Right _ ->
                   pure Json.Encode.null
       where
