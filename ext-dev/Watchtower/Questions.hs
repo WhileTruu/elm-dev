@@ -390,6 +390,7 @@ ask state question =
        in do
             root <- fmap (Maybe.fromMaybe ".") (Watchtower.Live.getRoot path state)
             Ext.Dev.Find.definition root location
+              & fmap Ext.Dev.Find.encodeResult
               & fmap Json.Encode.encodeUgly
     FindAllInstancesPlease location ->
       pure (Data.ByteString.Builder.byteString "NOTDONE")

@@ -3,7 +3,9 @@
 module Ext.Dev.Find
   ( definition
   , usedModules
-  )
+  , encodeResult
+  , DefinitionResult (..)
+  ) 
 where
 
 import AST.Canonical (Type (..))
@@ -50,12 +52,18 @@ import qualified Ext.Dev.Package
 
 {- Find Definition -}
 
-definition :: FilePath -> Watchtower.Editor.PointLocation -> IO Json.Encode.Value
+data DefinitionResult =
+  DefinitionResult
+    { path :: FilePath
+    , region :: A.Region
+    }
+
+definition :: FilePath -> Watchtower.Editor.PointLocation -> IO (Either String DefinitionResult)
 definition root (Watchtower.Editor.PointLocation path point) = do
   (Ext.CompileProxy.Single source warnings interfaces canonical compiled) <- Ext.CompileProxy.loadSingle root path
   case source of
-    Left _ ->
-       pure Json.Encode.null
+    Left err ->
+       pure (Left (show err))
     
     Right srcMod -> do
       let foundType = findTypeAtPoint point srcMod
@@ -75,16 +83,17 @@ definition root (Watchtower.Editor.PointLocation path point) = do
 
       case found of
         FoundNothing -> do
-          pure Json.Encode.null
+          pure (Left $ "Found nothing for: " ++ show srcMod)
 
         FoundExpr expr patterns -> do
           case getLocatedDetails expr of
             Nothing ->
-                pure Json.Encode.null
+                pure (Left "Found no location details for expr.")
 
             Just (Local localName) ->
               findFirstPatternIntroducing localName patterns
-                & encodeResult path
+                & fmap (\(A.At region _) -> Right (DefinitionResult path region))
+                & Maybe.fromMaybe (Left "Not found")
                 & pure
 
             Just (External extCanMod name) ->
@@ -96,21 +105,21 @@ definition root (Watchtower.Editor.PointLocation path point) = do
         FoundPattern (A.At _ (Can.PCtor extCanMod _ _ ctorName _ _)) -> do
           findExternalWith findFirstCtorNamed ctorName Src._unions extCanMod
 
-        FoundPattern _ ->
-          pure Json.Encode.null
+        FoundPattern pattern ->
+          pure (Left ("Found pattern: " ++ show pattern))
 
         FoundType tipe -> do
           canonicalizationEnvResult <- Ext.CompileProxy.loadCanonicalizeEnv root path srcMod
           case canonicalizationEnvResult of
             Nothing ->
-              pure Json.Encode.null
+              pure (Left "did not canonicalize env")
 
             Just env -> do
               let (_, eitherCanType) = Reporting.Result.run $ Canonicalize.Type.canonicalize env tipe
 
               case eitherCanType of
                 Left err ->
-                  pure Json.Encode.null
+                  pure (Left "FoundType canonicalization error.")
 
                 Right (Can.TType extCanMod name _) ->
                   findExternalWith findFirstTypeNamed name id extCanMod
@@ -119,7 +128,7 @@ definition root (Watchtower.Editor.PointLocation path point) = do
                   findExternalWith findFirstTypeNamed name id extCanMod
 
                 Right _ ->
-                  pure Json.Encode.null
+                  pure (Left "FoundType unhandled.")
       where
         findExternalWith findFn name listAccess canMod = do
           details <- Ext.CompileProxy.loadProject root
@@ -128,14 +137,14 @@ definition root (Watchtower.Editor.PointLocation path point) = do
             Nothing ->
               case Ext.Dev.Project.lookupPkgName details (ModuleName._module canMod) of
                 Nothing ->
-                  pure Json.Encode.null
+                  pure (Left "Package lookup failed")
 
                 Just pkgName -> do
                   maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
 
                   case maybeCurrentVersion of
                     Nothing ->
-                      pure Json.Encode.null
+                      pure (Left "Failed to find package version.")
 
                     Just version -> do
                       packageCache <- Stuff.getPackageCache
@@ -147,11 +156,12 @@ definition root (Watchtower.Editor.PointLocation path point) = do
                         Right (_, sourceMod) -> do
                           listAccess sourceMod
                             & findFn name
-                            & encodeResult path
+                            & fmap (\(A.At region _) -> Right (DefinitionResult path region))
+                            & Maybe.fromMaybe (Left "Could not find region for package.")
                             & pure
 
                         Left err -> do
-                             pure Json.Encode.null
+                            pure (Left "Failed to find package version.")
 
             Just targetPath -> do
               loadedFile <- Ext.CompileProxy.loadFileSource root targetPath
@@ -159,18 +169,19 @@ definition root (Watchtower.Editor.PointLocation path point) = do
                 Right (_, sourceMod) -> do
                   listAccess sourceMod
                     & findFn name
-                    & encodeResult targetPath
+                    & fmap (\(A.At region _) -> Right (DefinitionResult targetPath region))
+                    & Maybe.fromMaybe (Left $ "I was trying to find a function corresponding to \"" ++ Name.toChars name ++ "\", and failed, obviously.")
                     & pure
 
-                Left _ ->
-                     pure Json.Encode.null
+                Left err ->
+                    pure (Left (show err))
 
-encodeResult :: FilePath -> Maybe (A.Located a) -> Json.Encode.Value
-encodeResult path result =
+encodeResult :: Either String DefinitionResult -> Json.Encode.Value
+encodeResult result =
   case result of
-    Nothing ->
+    Left _ ->
       Json.Encode.null
-    Just (A.At region _) ->
+    Right (DefinitionResult path region) ->
       Json.Encode.object
         [ ( "definition",
             Json.Encode.object
