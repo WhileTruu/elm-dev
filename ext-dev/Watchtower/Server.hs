@@ -1,285 +1,90 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Watchtower.Server (Flags (..), serve) where
 
 import Control.Applicative ((<|>))
-import qualified Control.Concurrent.STM as STM
-import qualified Control.Exception
-import Control.Monad (guard, when)
 import Control.Monad.Trans (MonadIO (liftIO))
-import Data.Aeson ((.:))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Types as AesonTypes
-import qualified Data.ByteString.Builder
-import qualified Data.ByteString.Char8 as B
-import qualified Data.ByteString.Lazy.Char8 as LB
-import qualified Data.Foldable
-import Data.List as List
-import Data.Maybe as Maybe
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
-import qualified Data.Text.Encoding.Error as Aeson
-import qualified Data.Text.Lazy.Builder as TB
-import qualified Data.Text.Lazy.IO as TIO
 import qualified Develop.Generate.Help
 import qualified Ext.Common
-import qualified Ext.CompileMode
-import qualified Ext.FileCache as FileCache
 import qualified Ext.Filewatch
-import qualified Ext.Log
-import qualified GHC.Generics as Generics
 import qualified Json.Encode
-import qualified Reporting.Annotation
 import qualified Reporting.Annotation as Ann
-import qualified Snap.Core hiding (path)
+import Snap.Core hiding (path)
 import qualified Snap.Http.Server
 import Snap.Util.FileServe
 import qualified System.Directory as Dir
-import qualified System.Exit
-import qualified System.IO as IO
-import qualified Text.Parsec as Parsec
-import qualified Text.Parsec.String as Parsec
-import qualified Watchtower.Editor
 import qualified Watchtower.Live
-import qualified Watchtower.Live.Client as Client
 import qualified Watchtower.Live.Compile
 import qualified Watchtower.Questions
 import qualified Watchtower.StaticAssets
+import Data.Maybe as Maybe
+
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
+
+import qualified Ext.FileCache as FileCache
+
+import qualified Ext.CompileMode
+import qualified Ext.Log
 
 newtype Flags = Flags
   { _port :: Maybe Int
   }
 
-readHeader :: IO Int
-readHeader = do
-  line <- B.hGetLine IO.stdin
-  if "Content-Length: " `B.isPrefixOf` line
-    then return (read $ B.unpack $ B.drop 16 line)
-    else readHeader
-
 serve :: Maybe FilePath -> Flags -> IO ()
-serve maybeRoot (Flags maybePort) = do
-  logWrite $ "Starting server..." ++ show maybeRoot
-  liveState <- Watchtower.Live.init
-  loop liveState
-  where
-    loop liveState@(Client.State mClients mProjects) = do
-      contentLen <- readHeader
+serve maybeRoot (Flags maybePort) =
+  do
+    let port = Ext.Common.withDefault 51213 maybePort
+    Ext.Common.atomicPutStrLn $ "elm-dev is now running at http://localhost:" ++ show port
 
-      logWrite $ "Content-Length: " ++ show contentLen
+    liveState <- Watchtower.Live.init
 
-      body <- B.hGet IO.stdin (contentLen + 2)
+    debug <- Ext.Log.isActive Ext.Log.VerboseServer
+    Ext.Log.log Ext.Log.VerboseServer ("Running in " <> (show Ext.CompileMode.getMode) <> " Mode")
+    -- VSCode is telling us when files change
+    -- Start file watcher for the memory mode
+    -- Ext.Filewatch.watch root (Watchtower.Live.recompile liveState)
 
-      logWrite $ "Body: " ++ B.unpack body
 
-      case Aeson.eitherDecodeStrict body of
-        Left err -> do
-          logWrite $ "Error: " ++ err
-          loop liveState
-        Right (Initialize {reqId = idValue, rootPath = rootPath}) -> do
-          logWrite $ "Initialize..." ++ rootPath
+    Snap.Http.Server.httpServe (config port debug) $
+      serveAssets
+        <|> Watchtower.Live.websocket liveState
+        <|> Watchtower.Questions.serve liveState
+        <|> error404
 
-          discovered <- Watchtower.Live.discoverProjects rootPath
-          STM.atomically $ do
-            STM.modifyTVar
-              mProjects
-              ( \projects ->
-                  List.foldl
-                    ( \existing new ->
-                        if List.any (Client.matchingProject new) existing
-                          then existing
-                          else new : existing
-                    )
-                    projects
-                    discovered
-              )
+config :: Int -> Bool -> Snap.Http.Server.Config Snap a
+config port isDebug =
+  Snap.Http.Server.setVerbose isDebug $
+    Snap.Http.Server.setPort port $
+      Snap.Http.Server.setAccessLog (Snap.Http.Server.ConfigIoLog logger) $
+        Snap.Http.Server.setErrorLog
+          (Snap.Http.Server.ConfigIoLog logger)
+          Snap.Http.Server.defaultConfig
 
-          respond idValue $
-            Aeson.object
-              [ "capabilities"
-                  Aeson..= Aeson.object
-                    [ -- "textDocumentSync" Aeson..= Aeson.object ["openClose" Aeson..= True],
-                      -- "hoverProvider" Aeson..= True,
-                      "definitionProvider" Aeson..= Aeson.object []
-                    ],
-                "serverInfo"
-                  Aeson..= Aeson.object
-                    [ "name" Aeson..= ("my-elm-ls" :: String),
-                      "version" Aeson..= ("0.0.1" :: String)
-                    ]
-              ]
-          loop liveState
-        Right (Shutdown {reqId = idValue}) -> do
-          logWrite "Shut down..."
-          respond idValue Aeson.Null
-          System.Exit.exitSuccess
-        Right Exit -> do
-          logWrite "Exiting program..."
-          System.Exit.exitSuccess
-        Right Initialized -> do
-          logWrite "Initialized!"
-          loop liveState
-        Right (Definition {reqId = idValue, params = params}) -> do
-          let row = fromIntegral $ line $ position params
-          let col = fromIntegral $ character $ position params
-          let position = Reporting.Annotation.Position (row + 1) (col + 1)
-          let urix = uri $ textDocument params
-          let pointLocation = Watchtower.Editor.PointLocation (drop 7 urix) position
 
-          answer <- Watchtower.Questions.ask liveState (Watchtower.Questions.FindDefinitionPlease pointLocation)
-          logWrite $ "Definition: " ++ show answer
+logger =
+  (\bs ->
+      Ext.Log.log Ext.Log.VerboseServer  $ T.unpack $ T.decodeUtf8 bs
+  )
 
-          let defData = Aeson.eitherDecode $ Data.ByteString.Builder.toLazyByteString answer :: Either String MyData
 
-          case defData of
-            Left err -> do
-              respondErr idValue err
-              loop liveState
-            Right dataz -> do
-              respond idValue $
-                Aeson.object
-                  [ "uri" Aeson..= ("file://" ++ path dataz :: String),
-                    "range"
-                      Aeson..= Aeson.object
-                        [ "start"
-                            Aeson..= Aeson.object
-                              [ "line" Aeson..= (startLine dataz - 1),
-                                "character" Aeson..= (startColumn dataz - 1)
-                              ],
-                          "end"
-                            Aeson..= Aeson.object
-                              [ "line" Aeson..= (endLine dataz - 1),
-                                "character" Aeson..= (endColumn dataz - 1)
-                              ]
-                        ]
-                  ]
-              loop liveState
+-- SERVE STATIC ASSETS
 
-data MyData = MyData
-  { path :: String,
-    startLine :: Int,
-    startColumn :: Int,
-    endLine :: Int,
-    endColumn :: Int
-  }
-  deriving (Show)
+serveAssets :: Snap ()
+serveAssets =
+  do
+    path <- getSafePath
+    case Watchtower.StaticAssets.lookup path of
+      Nothing ->
+        pass
+      Just (content, mimeType) ->
+        do
+          modifyResponse (setContentType (mimeType <> ";charset=utf-8"))
+          writeBS content
 
-instance Aeson.FromJSON MyData where
-  parseJSON = Aeson.withObject "MyData" $ \v -> do
-    definition <- v .: "definition"
-    region <- definition .: "region"
-    start <- region .: "start"
-    end <- region .: "end"
-    MyData
-      <$> (definition .: "path" :: AesonTypes.Parser String)
-      <*> start .: "line"
-      <*> start .: "column"
-      <*> end .: "line"
-      <*> end .: "column"
-
-respond :: Int -> Aeson.Value -> IO ()
-respond idValue value =
-  let header = "Content-Length: " ++ show (B.length content) ++ "\r\n\r\n"
-      content = LB.toStrict $ Aeson.encode $ Aeson.object ["id" Aeson..= idValue, "result" Aeson..= value]
-   in do
-        logWrite $ show (B.pack header `B.append` content)
-        B.hPutStr IO.stdout (B.pack header `B.append` content)
-        IO.hFlush IO.stdout
-
-respondErr :: Int -> String -> IO ()
-respondErr idValue message =
-  let header = "Content-Length: " ++ show (B.length content) ++ "\r\n\r\n"
-      content =
-        LB.toStrict $
-          Aeson.encode $
-            Aeson.object
-              [ "id" Aeson..= idValue,
-                "error"
-                  Aeson..= Aeson.object
-                    [ "code" Aeson..= (-32603 :: Int),
-                      "message" Aeson..= (message :: String)
-                    ]
-              ]
-   in do
-        logWrite $ show (B.pack header `B.append` content)
-        B.hPutStr IO.stdout (B.pack header `B.append` content)
-        IO.hFlush IO.stdout
-
-logWrite :: String -> IO ()
-logWrite str = do
-  appendFile "/tmp/lsp.log" ("\n" ++ str)
-
-data MessageHeader = MessageHeader
-  { messageStart :: Int,
-    contentLen :: Int
-  }
-  deriving (Show)
-
-messageHeaderParser :: Parsec.Parser MessageHeader
-messageHeaderParser = messageHeaderParserHelp 0
-  where
-    messageHeaderParserHelp i = Parsec.try (parseContentLength i) <|> parseAnyChar i
-
-    parseContentLength i = do
-      _ <- Parsec.string "Content-Length: "
-      lenStr <- Parsec.many1 Parsec.digit
-      let len = read lenStr
-      _ <- Parsec.string "\r\n\r\n"
-      return $ MessageHeader {contentLen = len, messageStart = i + length (show len) + 20}
-
-    parseAnyChar i = do
-      _ <- Parsec.anyChar
-      messageHeaderParserHelp (i + 1)
-
-data Position = Position
-  { line :: Int,
-    character :: Int
-  }
-  deriving (Show, Generics.Generic)
-
-data TextDocument = TextDocument
-  { uri :: String
-  }
-  deriving (Show, Generics.Generic)
-
-data Params = Params
-  { textDocument :: TextDocument,
-    position :: Position
-  }
-  deriving (Show, Generics.Generic)
-
-data Method
-  = Initialize {reqId :: Int, rootPath :: String}
-  | Shutdown {reqId :: Int}
-  | Definition {reqId :: Int, params :: Params}
-  | Exit
-  | Initialized
-  deriving (Show, Generics.Generic)
-
-instance Aeson.FromJSON Position
-
-instance Aeson.FromJSON Params
-
-instance Aeson.FromJSON TextDocument
-
--- instance Aeson.FromJSON Params
-
-instance Aeson.FromJSON Method where
-  parseJSON = Aeson.withObject "Method" $ \v -> do
-    method <- v .: "method" :: AesonTypes.Parser String
-    case method of
-      "exit" -> pure Exit
-      "initialized" -> pure Initialized
-      "initialize" -> do
-        params <- v .: "params"
-        Initialize
-          <$> v .: "id"
-          <*> params .: "rootPath"
-      "shutdown" -> Shutdown <$> v .: "id"
-      "textDocument/definition" ->
-        Definition
-          <$> v .: "id"
-          <*> v .: "params"
-      _ -> fail "Unknown method"
+error404 :: Snap ()
+error404 =
+  do
+    modifyResponse $ setResponseStatus 404 "Not Found"
+    modifyResponse $ setContentType "text/html; charset=utf-8"
+    writeBuilder $ "404 page not found!"

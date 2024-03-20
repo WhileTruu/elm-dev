@@ -22,6 +22,8 @@ import qualified Text.PrettyPrint.ANSI.Leijen as P
 import qualified Watchtower.Server
 import qualified Watchtower.Live
 
+import qualified LanguageServer
+
 import qualified Ext.Common
 
 import qualified Data.Utf8 as Utf8
@@ -94,6 +96,7 @@ main =
     , explain
     -- call graph needs some more thought
     -- , callgraph
+    , languageServer
     ]
 
 
@@ -524,6 +527,28 @@ exampleProjectDir :: String -> IO [String]
 exampleProjectDir _ =
   return ["/path/to/my/project" ]
 
+
+
+ {-  Start Language Server -}
+
+languageServer :: Terminal.Command
+languageServer =
+  let
+    summary =
+      "Start the Elm Dev language server."
+
+    details =
+      "The `language-server` command starts the Elm Dev language server on your computer:"
+
+    example =
+      reflow
+        "After running that command, the language server is listening on stdin\
+        \ and ready to be connected to."
+
+    serverFlags =
+      flags Flags
+  in
+  Terminal.Command "language-server" (Common summary) details example noArgs noFlags (\_ _ -> LanguageServer.serve)
 
 
 

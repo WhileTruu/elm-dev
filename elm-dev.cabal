@@ -250,6 +250,9 @@ Executable elm-dev
         Watchtower.Version
         Watchtower.Websocket
 
+        -- Language server
+        LanguageServer
+
         -- elm-dev
         ElmDevElmVersion
         Ext.Dev
