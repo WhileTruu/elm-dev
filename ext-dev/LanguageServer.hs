@@ -44,8 +44,9 @@ import qualified Text.Parsec as Parsec
 import qualified Text.Parsec.String as Parsec
 import qualified Watchtower.Editor
 import qualified Watchtower.Live
+import qualified Watchtower.Live.Compile
 import qualified Watchtower.Live.Client as Client
-
+import qualified System.FilePath as FilePath
 
 
 serve :: IO ()
@@ -156,7 +157,7 @@ instance Aeson.FromJSON Request where
 -- {"jsonrpc":"2.0","method":"textDocument/didSave","params":{"textDocument":{"uri":"file:///Users/truu/contadev/front-end/app/elm/Admin/Organization/OverviewPage.elm"}}}
 
 handleRequest :: Watchtower.Live.State -> Request -> IO ()
-handleRequest liveState@(Client.State mClients mProjects) request =
+handleRequest state@(Client.State mClients mProjects) request =
   case request of
     Initialize {reqId = idValue, rootPath = rootPath} -> do
       logWrite $ "Initialize..." ++ rootPath
@@ -208,7 +209,7 @@ handleRequest liveState@(Client.State mClients mProjects) request =
       logWrite "Initialized!"
 
     Definition {reqId = reqId, filePath = filePath, position = position} -> do
-      root <- fmap (Maybe.fromMaybe ".") (Watchtower.Live.getRoot filePath liveState)
+      root <- fmap (Maybe.fromMaybe ".") (Watchtower.Live.getRoot filePath state)
       answer <- Ext.Dev.Find.definition root (Watchtower.Editor.PointLocation filePath position)
 
       case answer of
@@ -235,7 +236,8 @@ handleRequest liveState@(Client.State mClients mProjects) request =
               ]
 
     DidSave {filePath = filePath} -> do
-      logWrite $ "File saved: " ++ filePath
+      logWrite ("👀 file saved: " <> FilePath.takeFileName filePath)
+      Watchtower.Live.Compile.recompile state [filePath]
 
 
 -- RESPONSE
