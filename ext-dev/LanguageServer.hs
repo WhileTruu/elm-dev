@@ -232,28 +232,6 @@ handleRequest liveState@(Client.State mClients mProjects) request =
 -- RESPONSE
 
 
-data MyData = MyData
-  { path :: String,
-    startLine :: Int,
-    startColumn :: Int,
-    endLine :: Int,
-    endColumn :: Int
-  }
-  deriving (Show)
-
-instance Aeson.FromJSON MyData where
-  parseJSON = Aeson.withObject "MyData" $ \v -> do
-    definition <- v .: "definition"
-    region <- definition .: "region"
-    start <- region .: "start"
-    end <- region .: "end"
-    MyData
-      <$> (definition .: "path" :: AesonTypes.Parser String)
-      <*> start .: "line"
-      <*> start .: "column"
-      <*> end .: "line"
-      <*> end .: "column"
-
 respond :: Int -> Aeson.Value -> IO ()
 respond idValue value =
   let header = "Content-Length: " ++ show (B.length content) ++ "\r\n\r\n"
@@ -262,6 +240,7 @@ respond idValue value =
         logWrite $ show (B.pack header `B.append` content)
         B.hPutStr IO.stdout (B.pack header `B.append` content)
         IO.hFlush IO.stdout
+
 
 respondErr :: Int -> String -> IO ()
 respondErr idValue message =
@@ -282,15 +261,14 @@ respondErr idValue message =
         B.hPutStr IO.stdout (B.pack header `B.append` content)
         IO.hFlush IO.stdout
 
-logWrite :: String -> IO ()
-logWrite str = do
-  appendFile "/tmp/lsp.log" ("\n" ++ str)
+
 
 data MessageHeader = MessageHeader
   { messageStart :: Int,
     contentLen :: Int
   }
   deriving (Show)
+
 
 messageHeaderParser :: Parsec.Parser MessageHeader
 messageHeaderParser = messageHeaderParserHelp 0
@@ -310,5 +288,11 @@ messageHeaderParser = messageHeaderParserHelp 0
 
 
 
+-- UTILS
+
+
+logWrite :: String -> IO ()
+logWrite str = do
+  appendFile "/tmp/lsp.log" ("\n" ++ str)
 
 
