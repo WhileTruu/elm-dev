@@ -91,29 +91,13 @@ readHeader = do
 
 
 data Request
-  = Initialize {reqId :: Int, rootPath :: String}
+  = Initialize {reqId :: Int, rootPath :: FilePath}
   | Shutdown {reqId :: Int}
-  | Definition {reqId :: Int, params :: Params}
+  | Definition {reqId :: Int, filePath :: FilePath, position :: Reporting.Annotation.Position}
   | Exit
   | Initialized
+  | DidSave {filePath :: FilePath}
   deriving (Show, Generics.Generic)
-
-
-data Params = Params
-  { textDocument :: TextDocument,
-    position :: Position
-  }
-  deriving (Show, Generics.Generic)
-instance Aeson.FromJSON Params
-
-
-data TextDocument = TextDocument
-  { uri :: String
-  }
-  deriving (Show, Generics.Generic)
-
-instance Aeson.FromJSON TextDocument
-
 
 data Position = Position
   { line :: Int,
@@ -128,20 +112,48 @@ instance Aeson.FromJSON Request where
   parseJSON = Aeson.withObject "Method" $ \v -> do
     method <- v .: "method" :: AesonTypes.Parser String
     case method of
-      "exit" -> pure Exit
-      "initialized" -> pure Initialized
+      "exit" -> 
+        pure Exit
+
+      "initialized" -> 
+        pure Initialized
+
       "initialize" -> do
         params <- v .: "params"
-        Initialize
+        Initialize <$> v .: "id" <*> params .: "rootPath"
+
+      "shutdown" -> 
+        Shutdown <$> v .: "id"
+
+      "textDocument/definition" -> do
+        params <- v .: "params"
+
+        textDocument <- params .: "textDocument"
+        uri <- textDocument .: "uri"
+        let filePath = drop 7 uri
+
+        position <- params .: "position"
+        let row = fromIntegral $ line position 
+        let col = fromIntegral $ character position 
+
+        Definition 
           <$> v .: "id"
-          <*> params .: "rootPath"
-      "shutdown" -> Shutdown <$> v .: "id"
-      "textDocument/definition" ->
-        Definition
-          <$> v .: "id"
-          <*> v .: "params"
+          <*> pure filePath
+          <*> pure (Reporting.Annotation.Position (row + 1) (col + 1))
+
+      "textDocument/didSave" -> do
+        params <- v .: "params"
+
+        textDocument <- params .: "textDocument"
+        uri <- textDocument .: "uri"
+        let filePath = drop 7 uri
+
+        pure $ DidSave filePath
+
       _ -> fail "Unknown method"
 
+
+-- {"jsonrpc":"2.0","method":"textDocument/didSave","params":{"textDocument":{"uri":"file:///Users/truu/contadev/front-end/app/elm/Admin/Organization/OverviewPage.elm"}}}
 
 handleRequest :: Watchtower.Live.State -> Request -> IO ()
 handleRequest liveState@(Client.State mClients mProjects) request =
@@ -195,21 +207,16 @@ handleRequest liveState@(Client.State mClients mProjects) request =
     Initialized -> do
       logWrite "Initialized!"
 
-    Definition {reqId = idValue, params = params} -> do
-      let row = fromIntegral $ line $ position params
-      let col = fromIntegral $ character $ position params
-      let position = Reporting.Annotation.Position (row + 1) (col + 1)
-      let path = drop 7 . uri $ textDocument params
-
-      root <- fmap (Maybe.fromMaybe ".") (Watchtower.Live.getRoot path liveState)
-      answer <- Ext.Dev.Find.definition root (Watchtower.Editor.PointLocation path position)
+    Definition {reqId = reqId, filePath = filePath, position = position} -> do
+      root <- fmap (Maybe.fromMaybe ".") (Watchtower.Live.getRoot filePath liveState)
+      answer <- Ext.Dev.Find.definition root (Watchtower.Editor.PointLocation filePath position)
 
       case answer of
         Left err -> do
-          respondErr idValue err
+          respondErr reqId err
 
         Right (Ext.Dev.Find.DefinitionResult filePath (Ann.Region (Ann.Position sr sc) (Ann.Position er ec))) -> do
-          respond idValue $
+          respond reqId $
             Aeson.object
               [ "uri" Aeson..= ("file://" ++ filePath :: String),
                 "range"
@@ -227,6 +234,8 @@ handleRequest liveState@(Client.State mClients mProjects) request =
                     ]
               ]
 
+    DidSave {filePath = filePath} -> do
+      logWrite $ "File saved: " ++ filePath
 
 
 -- RESPONSE
