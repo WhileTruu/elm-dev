@@ -55,7 +55,16 @@ import Ext.Common
 import qualified Ext.Dev
 import qualified Reporting.Render.Type.Localizer
 import qualified Ext.CompileProxy
-
+import qualified Reporting.Exit as Exit
+import qualified Reporting.Exit.Help as ExitHelp
+import qualified Reporting.Error
+import qualified Reporting.Render.Code as Code
+import qualified Data.NonEmptyList as NE
+import qualified Reporting.Report as Report
+import qualified Reporting.Doc
+import qualified Text.PrettyPrint.ANSI.Leijen as P
+import qualified Reporting.Warning
+import qualified Ext.FileCache as File
 
 serve :: IO ()
 serve = do
@@ -306,9 +315,6 @@ recompile (State mProjects) allChangedFiles = do
         -- Get the status of the entire project
         Monad.mapM_ recompileProject affectedProjects
 
-        -- send down warnings and docs
-        Monad.mapM_ sendInfo affectedProjects
-
   else
     pure ()
 
@@ -342,49 +348,115 @@ recompileProject ( _, _, proj@(Client.ProjectCache (Ext.Dev.Project.Project proj
 recompileFile :: (String, [String], Client.ProjectCache) -> IO ()
 recompileFile ( top, remain, projCache@(Client.ProjectCache proj@(Ext.Dev.Project.Project projectRoot entrypoints) cache)) =
     do
-      -- FIXME: remove and replace with sending diagnostics via stdout
-      mClients <- STM.newTVarIO []
-
       let entry = NonEmpty.List top remain
 
       -- Compile all changed files
-      eitherStatusJson <- Ext.CompileProxy.compileToJson projectRoot entry
+      result <- Ext.CompileProxy.compileWithoutJsGen projectRoot entry
 
+      -- TODO: figure out that the following code did :D
+      --
+      -- Ext.Sentry.updateCompileResult cache $
+      --   pure $ case result of
+      --     Right _ ->
+      --       Right $ Aeson.object [ "compiled" ==> Encode.bool True ]
 
-      Ext.Sentry.updateCompileResult cache $
-        pure eitherStatusJson
+      --     Left exit -> do
+      --       Left $ Exit.toJson $ Exit.reactorToReport exit
 
       -- Send compilation status
-      case eitherStatusJson of
-        Right statusJson -> do
-          Client.broadcast mClients
-            (Client.ElmStatus [ Client.ProjectStatus proj True statusJson ])
+      case result of
+        Right _ ->
+          mapM_
+            (\path -> do
+              source <- File.readUtf8 top
+              (Ext.Dev.Info warnings docs) <- Ext.Dev.info projectRoot top
+              let warningReports = case warnings of
+                                    Nothing -> []
+                                    Just (sourceMod, warns) ->
+                                      map
+                                        (Reporting.Warning.toReport
+                                          (Reporting.Render.Type.Localizer.fromModule sourceMod)
+                                          (Code.toSource source)
+                                        )
+                                        warns
+              -- case docs of
+              --   Nothing -> pure ()
 
-        Left errJson -> do
-          Client.broadcast mClients
-            (Client.ElmStatus [ Client.ProjectStatus proj False errJson ])
+              --   Just docs ->
+              --     Client.broadcast mClients
+              --       (Client.Docs top [ docs ])
 
+              sendNotification "textDocument/publishDiagnostics"
+                    (Aeson.object
+                      [ "uri" Aeson..= ("file://" ++ path :: String)
+                      , "diagnostics" Aeson..= map
+                        (\(Report.Report title (Ann.Region (Ann.Position sr sc) (Ann.Position er ec)) _sgstns message) ->
+                          Aeson.object
+                            [ "range" Aeson..= Aeson.object
+                              [ "start" Aeson..= Aeson.object
+                                [ "line" Aeson..= (sr - 1)
+                                , "character" Aeson..= (sc - 1)
+                                ]
+                              , "end" Aeson..= Aeson.object
+                                [ "line" Aeson..= (er - 1)
+                                , "character" Aeson..= (ec - 1)
+                                ]
+                              ]
+                            , "severity" Aeson..= (2 :: Int)
+                            , "message" Aeson..= (title ++ "\n\n" ++ Reporting.Doc.toString message :: String)
+                            ]
+                        )
+                        warningReports
+                      ]
+                    )
+            )
+            (top : remain)
 
-sendInfo :: (String, [String], Client.ProjectCache) -> IO ()
-sendInfo ( top, remain , projCache@(Client.ProjectCache proj@(Ext.Dev.Project.Project projectRoot entrypoints) cache)) = do
-    -- FIXME: remove and replace with sending diagnostics via stdout
-    mClients <- STM.newTVarIO []
+        Left exitReactor -> do
+          let report = Exit.reactorToReport exitReactor
 
-    (Ext.Dev.Info warnings docs) <- Ext.Dev.info projectRoot top
+          case report of
+            ExitHelp.CompilerReport filePath e es ->
+              mapM_
+                (\(Reporting.Error.Module name path _ source err) ->
+                  let
+                    reports = Reporting.Error.toReports (Code.toSource source) err
 
-    case warnings of
-      Nothing -> pure ()
-      
-      Just (sourceMod, warns) ->
-        Client.broadcast mClients
-          (Client.Warnings top (Reporting.Render.Type.Localizer.fromModule sourceMod) warns)
+                  in
+                  sendNotification "textDocument/publishDiagnostics"
+                    (Aeson.object
+                      [ "uri" Aeson..= ("file://" ++ path :: String)
+                      , "diagnostics" Aeson..= map
+                        (\(Report.Report title (Ann.Region (Ann.Position sr sc) (Ann.Position er ec)) _sgstns message) ->
+                          Aeson.object
+                            [ "range" Aeson..= Aeson.object
+                              [ "start" Aeson..= Aeson.object
+                                [ "line" Aeson..= (sr - 1)
+                                , "character" Aeson..= (sc - 1)
+                                ]
+                              , "end" Aeson..= Aeson.object
+                                [ "line" Aeson..= (er - 1)
+                                , "character" Aeson..= (ec - 1)
+                                ]
+                              ]
+                            , "severity" Aeson..= (1 :: Int)
+                            , "message" Aeson..= (title ++ "\n\n" ++ Reporting.Doc.toString message :: String)
+                            ]
+                        )
+                        (NE.toList reports)
+                      ]
+                    )
+                )
+                (e : es)
 
-    -- case docs of
-    --   Nothing -> pure ()
+            ExitHelp.Report title maybePath message ->
+              sendNotification "window/showMessage"
+                (Aeson.object
+                  [ "type" Aeson..= (1 :: Int)
+                  , "message" Aeson..= ExitHelp.toString (ExitHelp.reportToDoc report)
+                  ]
+                )
 
-    --   Just docs ->
-    --     Client.broadcast mClients
-    --       (Client.Docs top [ docs ])
 
 
 -- RESPONSE
@@ -397,6 +469,20 @@ respond idValue value =
     content = LB.toStrict $ Aeson.encode $ Aeson.object 
       [ "id" Aeson..= idValue
       , "result" Aeson..= value
+      ]
+   in do
+   logWrite $ show (B.pack header `B.append` content)
+   B.hPutStr IO.stdout (B.pack header `B.append` content)
+   IO.hFlush IO.stdout
+
+
+sendNotification :: String -> Aeson.Value -> IO ()
+sendNotification method value =
+  let
+    header = "Content-Length: " ++ show (B.length content) ++ "\r\n\r\n"
+    content = LB.toStrict $ Aeson.encode $ Aeson.object
+      [ "method" Aeson..= method
+      , "params" Aeson..= value
       ]
    in do
    logWrite $ show (B.pack header `B.append` content)
@@ -419,7 +505,6 @@ respondErr idValue message =
    logWrite $ show (B.pack header `B.append` content)
    B.hPutStr IO.stdout (B.pack header `B.append` content)
    IO.hFlush IO.stdout
-
 
 
 data MessageHeader = MessageHeader
@@ -452,6 +537,6 @@ messageHeaderParser = messageHeaderParserHelp 0
 
 logWrite :: String -> IO ()
 logWrite str = do
-  appendFile "/tmp/lsp.log" ("\n" ++ str)
+  appendFile "/tmp/lsp.log" (str ++ "\n\n")
 
 

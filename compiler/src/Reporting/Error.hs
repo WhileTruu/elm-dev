@@ -5,6 +5,7 @@ module Reporting.Error
   , Error(..)
   , toDoc
   , toJson
+  , toReports
   )
   where
 
