@@ -177,21 +177,17 @@ handleRequest state@(Client.State mClients mProjects) request =
 
       respond idValue $
         Aeson.object
-          [ "capabilities"
-              Aeson..= Aeson.object
-                [ -- "textDocumentSync" Aeson..= Aeson.object ["openClose" Aeson..= True],
-                  -- "hoverProvider" Aeson..= True,
-                  "definitionProvider" Aeson..= Aeson.object [],
-                  "textDocumentSync" Aeson..= 
-                    Aeson.object 
-                      [ "save" Aeson..= True
-                      ]
-                ],
-            "serverInfo"
-              Aeson..= Aeson.object
-                [ "name" Aeson..= ("my-elm-ls" :: String),
-                  "version" Aeson..= ("0.0.1" :: String)
+          [ "capabilities" Aeson..= Aeson.object
+            [ "definitionProvider" Aeson..= Aeson.object []
+            , "textDocumentSync" Aeson..= Aeson.object 
+                [ "save" Aeson..= True
+                -- , "openClose" Aeson..= True
                 ]
+            ]
+          , "serverInfo" Aeson..= Aeson.object
+            [ "name" Aeson..= ("my-elm-ls" :: String)
+            , "version" Aeson..= ("0.0.1" :: String)
+            ]
           ]
 
     Shutdown {reqId = idValue} -> do
@@ -217,20 +213,17 @@ handleRequest state@(Client.State mClients mProjects) request =
         Right (Ext.Dev.Find.DefinitionResult filePath (Ann.Region (Ann.Position sr sc) (Ann.Position er ec))) -> do
           respond reqId $
             Aeson.object
-              [ "uri" Aeson..= ("file://" ++ filePath :: String),
-                "range"
-                  Aeson..= Aeson.object
-                    [ "start"
-                        Aeson..= Aeson.object
-                          [ "line" Aeson..= (sr - 1),
-                            "character" Aeson..= (sc - 1)
-                          ],
-                      "end"
-                        Aeson..= Aeson.object
-                          [ "line" Aeson..= (er - 1),
-                            "character" Aeson..= (ec - 1)
-                          ]
-                    ]
+              [ "uri" Aeson..= ("file://" ++ filePath :: String)
+              , "range" Aeson..= Aeson.object
+                [ "start" Aeson..= Aeson.object
+                  [ "line" Aeson..= (sr - 1)
+                  , "character" Aeson..= (sc - 1)
+                  ]
+                , "end" Aeson..= Aeson.object
+                  [ "line" Aeson..= (er - 1)
+                  , "character" Aeson..= (ec - 1)
+                  ]
+                ]
               ]
 
     DidSave {filePath = filePath} -> do
@@ -243,38 +236,39 @@ handleRequest state@(Client.State mClients mProjects) request =
 
 respond :: Int -> Aeson.Value -> IO ()
 respond idValue value =
-  let header = "Content-Length: " ++ show (B.length content) ++ "\r\n\r\n"
-      content = LB.toStrict $ Aeson.encode $ Aeson.object ["id" Aeson..= idValue, "result" Aeson..= value]
+  let 
+    header = "Content-Length: " ++ show (B.length content) ++ "\r\n\r\n"
+    content = LB.toStrict $ Aeson.encode $ Aeson.object 
+      [ "id" Aeson..= idValue
+      , "result" Aeson..= value
+      ]
    in do
-        logWrite $ show (B.pack header `B.append` content)
-        B.hPutStr IO.stdout (B.pack header `B.append` content)
-        IO.hFlush IO.stdout
+   logWrite $ show (B.pack header `B.append` content)
+   B.hPutStr IO.stdout (B.pack header `B.append` content)
+   IO.hFlush IO.stdout
 
 
 respondErr :: Int -> String -> IO ()
 respondErr idValue message =
-  let header = "Content-Length: " ++ show (B.length content) ++ "\r\n\r\n"
-      content =
-        LB.toStrict $
-          Aeson.encode $
-            Aeson.object
-              [ "id" Aeson..= idValue,
-                "error"
-                  Aeson..= Aeson.object
-                    [ "code" Aeson..= (-32603 :: Int),
-                      "message" Aeson..= (message :: String)
-                    ]
-              ]
+  let 
+    header = "Content-Length: " ++ show (B.length content) ++ "\r\n\r\n"
+    content = LB.toStrict $ Aeson.encode $ Aeson.object
+      [ "id" Aeson..= idValue
+      , "error" Aeson..= Aeson.object
+        [ "code" Aeson..= (-32603 :: Int)
+        , "message" Aeson..= (message :: String)
+        ]
+      ]
    in do
-        logWrite $ show (B.pack header `B.append` content)
-        B.hPutStr IO.stdout (B.pack header `B.append` content)
-        IO.hFlush IO.stdout
+   logWrite $ show (B.pack header `B.append` content)
+   B.hPutStr IO.stdout (B.pack header `B.append` content)
+   IO.hFlush IO.stdout
 
 
 
 data MessageHeader = MessageHeader
-  { messageStart :: Int,
-    contentLen :: Int
+  { messageStart :: Int
+  , contentLen :: Int
   }
   deriving (Show)
 
