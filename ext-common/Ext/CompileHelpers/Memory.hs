@@ -1,5 +1,6 @@
 module Ext.CompileHelpers.Memory
   ( compileToJson
+  , compileWithoutJsGen
   , allPackageArtifacts
   )
 where

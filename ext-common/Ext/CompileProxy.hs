@@ -11,6 +11,7 @@ module Ext.CompileProxy
     allPackageArtifacts,
     parse,
     compileToJson,
+    compileWithoutJsGen,
     compileToDocs,
     loadAndEnsureCompiled,
     ensureModulesAreCompiled,
@@ -147,6 +148,13 @@ compileToJson root paths = do
     "compileToJson"
     (Ext.CompileHelpers.Disk.compileToJson root paths)
     (Ext.CompileHelpers.Memory.compileToJson root paths)
+
+compileWithoutJsGen :: FilePath -> NE.List FilePath -> IO (Either Exit.Reactor ())
+compileWithoutJsGen root paths = do
+  modeRunner
+    "compileToJson"
+    (fmap (fmap (const ())) $ Ext.CompileHelpers.Disk.compileWithoutJsGen root paths)
+    (Ext.CompileHelpers.Memory.compileWithoutJsGen root paths)
 
 allPackageArtifacts :: FilePath -> IO CompileHelpers.Artifacts
 allPackageArtifacts root =

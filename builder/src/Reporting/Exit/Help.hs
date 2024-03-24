@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Reporting.Exit.Help
-  ( Report
+  ( Report(..)
   , report
   , docReport
   , jsonReport
