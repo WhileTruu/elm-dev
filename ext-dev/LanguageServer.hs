@@ -147,6 +147,7 @@ data Request
   | Exit
   | Initialized
   | DidSave {filePath :: FilePath}
+  | DidOpen {filePath :: FilePath}
   deriving (Show, Generics.Generic)
 
 data Position = Position
@@ -200,6 +201,15 @@ instance Aeson.FromJSON Request where
 
         pure $ DidSave filePath
 
+      "textDocument/didOpen" -> do
+        params <- v .: "params"
+
+        textDocument <- params .: "textDocument"
+        uri <- textDocument .: "uri"
+        let filePath = drop 7 uri
+
+        pure $ DidOpen filePath
+
       _ -> fail "Unknown method"
 
 
@@ -230,7 +240,7 @@ handleRequest state@(State mProjects) request =
             [ "definitionProvider" Aeson..= Aeson.object []
             , "textDocumentSync" Aeson..= Aeson.object 
                 [ "save" Aeson..= True
-                -- , "openClose" Aeson..= True
+                , "openClose" Aeson..= True
                 ]
             ]
           , "serverInfo" Aeson..= Aeson.object
@@ -277,6 +287,10 @@ handleRequest state@(State mProjects) request =
 
     DidSave {filePath = filePath} -> do
       logWrite ("👀 file saved: " <> FilePath.takeFileName filePath)
+      recompile state [filePath]
+
+    DidOpen {filePath = filePath} -> do
+      logWrite ("👀 file opened: " <> FilePath.takeFileName filePath)
       recompile state [filePath]
 
 
