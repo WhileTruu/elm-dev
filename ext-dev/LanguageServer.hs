@@ -47,16 +47,25 @@ import qualified Watchtower.Live
 import qualified Watchtower.Live.Compile
 import qualified Watchtower.Live.Client as Client
 import qualified System.FilePath as FilePath
+import qualified Ext.Dev.Project
+import qualified Ext.Sentry
+import Control.Monad as Monad (foldM, guard, mapM_)
+import qualified Data.NonEmptyList as NonEmpty
+import Ext.Common
+import qualified Ext.Dev
+import qualified Reporting.Render.Type.Localizer
+import qualified Ext.CompileProxy
 
 
 serve :: IO ()
 serve = do
   logWrite "Starting server..."
-  liveState <- Watchtower.Live.init
-  loop liveState
+  state <- State <$> STM.newTVarIO []
+
+  loop state
 
   where
-    loop liveState = do
+    loop state = do
       contentLen <- readHeader
 
       logWrite $ "Content-Length: " ++ show contentLen
@@ -68,11 +77,42 @@ serve = do
       case Aeson.eitherDecodeStrict body of
         Left err -> do
           logWrite $ "Error: " ++ err
-          loop liveState
+          loop state 
 
         Right request -> do
-          handleRequest liveState request
-          loop liveState
+          handleRequest state request
+          loop state
+
+
+
+-- STATE
+
+
+data State = State
+  { projects :: STM.TVar [Client.ProjectCache]
+  }
+
+
+getRoot :: FilePath -> State -> IO (Maybe FilePath)
+getRoot path (State mProjects) =
+  do
+    projects <- STM.readTVarIO mProjects
+    pure (getRootHelp path projects Nothing)
+
+
+getRootHelp path projects found =
+  case projects of
+    [] -> found
+    (Client.ProjectCache project _) : remain ->
+      if Ext.Dev.Project.contains path project
+        then case found of
+          Nothing ->
+            getRootHelp path remain (Just (Ext.Dev.Project._root project))
+          Just root ->
+            if List.length (Ext.Dev.Project._root project) > List.length root
+              then getRootHelp path remain (Just (Ext.Dev.Project._root project))
+              else getRootHelp path remain found
+        else getRootHelp path remain found
 
 
 
@@ -154,8 +194,8 @@ instance Aeson.FromJSON Request where
       _ -> fail "Unknown method"
 
 
-handleRequest :: Watchtower.Live.State -> Request -> IO ()
-handleRequest state@(Client.State mClients mProjects) request =
+handleRequest :: State -> Request -> IO ()
+handleRequest state@(State mProjects) request =
   case request of
     Initialize {reqId = idValue, rootPath = rootPath} -> do
       logWrite $ "Initialize..." ++ rootPath
@@ -203,7 +243,7 @@ handleRequest state@(Client.State mClients mProjects) request =
       logWrite "Initialized!"
 
     Definition {reqId = reqId, filePath = filePath, position = position} -> do
-      root <- fmap (Maybe.fromMaybe ".") (Watchtower.Live.getRoot filePath state)
+      root <- fmap (Maybe.fromMaybe ".") (getRoot filePath state)
       answer <- Ext.Dev.Find.definition root (Watchtower.Editor.PointLocation filePath position)
 
       case answer of
@@ -228,7 +268,123 @@ handleRequest state@(Client.State mClients mProjects) request =
 
     DidSave {filePath = filePath} -> do
       logWrite ("👀 file saved: " <> FilePath.takeFileName filePath)
-      Watchtower.Live.Compile.recompile state [filePath]
+      recompile state [filePath]
+
+
+
+-- COMPILE
+
+
+
+{-| This is called frequently.
+
+Generally when a file change has been saved, or the user has changed what their looking at in the editor.
+
+
+
+-}
+recompile :: State -> [String] -> IO ()
+recompile (State mProjects) allChangedFiles = do
+  let changedElmFiles = List.filter (\filepath -> ".elm" `List.isSuffixOf` filepath ) allChangedFiles
+
+  if changedElmFiles /= [] then do
+
+    projects <- STM.readTVarIO mProjects
+    let affectedProjects = Maybe.mapMaybe (toAffectedProject changedElmFiles) projects
+    case affectedProjects of
+        [] ->
+            Ext.Log.log Ext.Log.Live "No affected projects"
+        _ ->
+            pure ()
+
+    trackedForkIO $
+      track "recompile" $ do
+
+        -- send down status for
+        Monad.mapM_ recompileFile affectedProjects
+
+        -- Get the status of the entire project
+        Monad.mapM_ recompileProject affectedProjects
+
+        -- send down warnings and docs
+        Monad.mapM_ sendInfo affectedProjects
+
+  else
+    pure ()
+
+
+toAffectedProject :: [String] -> Client.ProjectCache -> Maybe (String, [String], Client.ProjectCache)
+toAffectedProject changedFiles projCache@(Client.ProjectCache proj@(Ext.Dev.Project.Project projectRoot entrypoints) cache) =
+      case changedFiles of
+        [] ->
+          Nothing
+
+        (top : remain) ->
+          if List.any (\f -> Ext.Dev.Project.contains f proj) changedFiles then
+            Just (top, remain, projCache)
+
+          else
+              Nothing
+
+
+recompileProject :: (String, [String], Client.ProjectCache) -> IO ()
+recompileProject ( _, _, proj@(Client.ProjectCache (Ext.Dev.Project.Project projectRoot entrypoints) cache)) =
+  case entrypoints of
+    [] ->
+      do
+        Ext.Log.log Ext.Log.Live ("Skipping compile, no entrypoint: " <> projectRoot)
+        pure ()
+
+    topEntry : remainEntry ->
+        recompileFile (topEntry, remainEntry, proj)
+
+
+recompileFile :: (String, [String], Client.ProjectCache) -> IO ()
+recompileFile ( top, remain, projCache@(Client.ProjectCache proj@(Ext.Dev.Project.Project projectRoot entrypoints) cache)) =
+    do
+      -- FIXME: remove and replace with sending diagnostics via stdout
+      mClients <- STM.newTVarIO []
+
+      let entry = NonEmpty.List top remain
+
+      -- Compile all changed files
+      eitherStatusJson <- Ext.CompileProxy.compileToJson projectRoot entry
+
+
+      Ext.Sentry.updateCompileResult cache $
+        pure eitherStatusJson
+
+      -- Send compilation status
+      case eitherStatusJson of
+        Right statusJson -> do
+          Client.broadcast mClients
+            (Client.ElmStatus [ Client.ProjectStatus proj True statusJson ])
+
+        Left errJson -> do
+          Client.broadcast mClients
+            (Client.ElmStatus [ Client.ProjectStatus proj False errJson ])
+
+
+sendInfo :: (String, [String], Client.ProjectCache) -> IO ()
+sendInfo ( top, remain , projCache@(Client.ProjectCache proj@(Ext.Dev.Project.Project projectRoot entrypoints) cache)) = do
+    -- FIXME: remove and replace with sending diagnostics via stdout
+    mClients <- STM.newTVarIO []
+
+    (Ext.Dev.Info warnings docs) <- Ext.Dev.info projectRoot top
+
+    case warnings of
+      Nothing -> pure ()
+      
+      Just (sourceMod, warns) ->
+        Client.broadcast mClients
+          (Client.Warnings top (Reporting.Render.Type.Localizer.fromModule sourceMod) warns)
+
+    -- case docs of
+    --   Nothing -> pure ()
+
+    --   Just docs ->
+    --     Client.broadcast mClients
+    --       (Client.Docs top [ docs ])
 
 
 -- RESPONSE
