@@ -217,7 +217,22 @@ handleRequest :: State -> Request -> IO ()
 handleRequest state@(State mProjects) request =
   case request of
     Initialize {reqId = idValue, rootPath = rootPath} -> do
-      logWrite $ "Initialize..." ++ rootPath
+      respond idValue $
+        Aeson.object
+          [ "capabilities" Aeson..= Aeson.object
+            [ "definitionProvider" Aeson..= Aeson.object []
+            , "textDocumentSync" Aeson..= Aeson.object 
+                [ "save" Aeson..= True
+                , "openClose" Aeson..= True
+                ]
+            ]
+          , "serverInfo" Aeson..= Aeson.object
+            [ "name" Aeson..= ("my-elm-ls" :: String)
+            , "version" Aeson..= ("0.0.1" :: String)
+            ]
+          ]
+      sendCreateWorkDoneProgress "initialization-progress"
+      sendProgressBegin "initialization-progress" "Discovering projects"
 
       discovered <- Watchtower.Live.discoverProjects rootPath
       STM.atomically $ do
@@ -234,20 +249,7 @@ handleRequest state@(State mProjects) request =
                 discovered
           )
 
-      respond idValue $
-        Aeson.object
-          [ "capabilities" Aeson..= Aeson.object
-            [ "definitionProvider" Aeson..= Aeson.object []
-            , "textDocumentSync" Aeson..= Aeson.object 
-                [ "save" Aeson..= True
-                , "openClose" Aeson..= True
-                ]
-            ]
-          , "serverInfo" Aeson..= Aeson.object
-            [ "name" Aeson..= ("my-elm-ls" :: String)
-            , "version" Aeson..= ("0.0.1" :: String)
-            ]
-          ]
+      sendProgressEnd "initialization-progress"
 
     Shutdown {reqId = idValue} -> do
       logWrite "Shut down..."
@@ -259,11 +261,21 @@ handleRequest state@(State mProjects) request =
       System.Exit.exitSuccess
 
     Initialized -> do
-      logWrite "Initialized!"
+      sendNotification "window/showMessage"
+        (Aeson.object
+          [ "type" Aeson..= (3 :: Int)
+          , "message" Aeson..= ("Initialized." :: String)
+          ]
+        )
 
     Definition {reqId = reqId, filePath = filePath, position = position} -> do
+      sendCreateWorkDoneProgress "go-to-definition-progress"
+      sendProgressBegin "go-to-definition-progress" "👀 Finding definition"
+
       root <- fmap (Maybe.fromMaybe ".") (getRoot filePath state)
       answer <- Ext.Dev.Find.definition root (Watchtower.Editor.PointLocation filePath position)
+
+      sendProgressEnd "go-to-definition-progress"
 
       case answer of
         Left err -> do
@@ -286,13 +298,55 @@ handleRequest state@(State mProjects) request =
               ]
 
     DidSave {filePath = filePath} -> do
-      logWrite ("👀 file saved: " <> FilePath.takeFileName filePath)
+      sendCreateWorkDoneProgress "compile-progress"
+      sendProgressBegin "compile-progress" "Compiling"
+
       recompile state [filePath]
+
+      sendProgressEnd "compile-progress"
 
     DidOpen {filePath = filePath} -> do
-      logWrite ("👀 file opened: " <> FilePath.takeFileName filePath)
+      sendCreateWorkDoneProgress "compile-progress"
+      sendProgressBegin "compile-progress" "Compiling"
+
       recompile state [filePath]
 
+      sendProgressEnd "compile-progress"
+
+
+sendCreateWorkDoneProgress :: String -> IO ()
+sendCreateWorkDoneProgress token = do
+  sendNotification "window/workDoneProgress/create"
+    (Aeson.object
+      [ "token" Aeson..= token
+      ]
+    )
+
+
+sendProgressBegin :: String -> String -> IO ()
+sendProgressBegin token title = do
+  sendNotification "$/progress"
+    (Aeson.object
+      [ "token" Aeson..= token
+      , "value" Aeson..= Aeson.object
+        [ "kind" Aeson..= ("begin" :: String)
+        , "title" Aeson..= title
+        -- , "message" Aeson..= ("YOLO" :: String)
+        ]
+      ]
+    )
+
+
+sendProgressEnd :: String -> IO ()
+sendProgressEnd token = do
+  sendNotification "$/progress"
+    (Aeson.object
+      [ "token" Aeson..= token
+      , "value" Aeson..= Aeson.object
+        [ "kind" Aeson..= ("end" :: String)
+        ]
+      ]
+    )
 
 
 -- COMPILE
