@@ -154,8 +154,6 @@ instance Aeson.FromJSON Request where
       _ -> fail "Unknown method"
 
 
--- {"jsonrpc":"2.0","method":"textDocument/didSave","params":{"textDocument":{"uri":"file:///Users/truu/contadev/front-end/app/elm/Admin/Organization/OverviewPage.elm"}}}
-
 handleRequest :: Watchtower.Live.State -> Request -> IO ()
 handleRequest state@(Client.State mClients mProjects) request =
   case request of
