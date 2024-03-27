@@ -83,7 +83,9 @@ encodeResult result =
 
 definition :: FilePath -> Watchtower.Editor.PointLocation -> IO (Either String PointRegion)
 definition root (Watchtower.Editor.PointLocation path point) = do
-  (Ext.CompileProxy.Single source warnings interfaces canonical compiled) <- Ext.CompileProxy.loadSingle root path
+  Ext.CompileProxy.Single source warnings interfaces canonical compiled
+    <- Ext.CompileProxy.loadSingle root path
+
   case source of
     Left err ->
        pure (Left (show err))
@@ -92,13 +94,14 @@ definition root (Watchtower.Editor.PointLocation path point) = do
       let foundType = findTypeAtPoint point srcMod
 
       appendFile "/tmp/lsp.log" ("point: " ++ show point ++ "\n  type: " ++ show foundType ++ "\n\n")
+
       found <-
         case foundType of
           FoundNothing -> do
             case canonical of
               Just canMod ->
                   pure $ findDeclAtPoint point (Can._decls canMod)
-              
+
               Nothing ->
                   pure foundType
 
@@ -222,6 +225,55 @@ findTypeAtPoint point srcMod =
   findAnnotation point (Src._values srcMod)
     & orFind (findUnion point) (Src._unions srcMod)
     & orFind (findAlias point) (Src._aliases srcMod)
+    & orFind (findAliasAtExactPoint point) (Src._aliases srcMod)
+    & orFind (findAliasTVarAtExactPoint point) (Src._aliases srcMod)
+
+
+-- Find alias at exact point, nicer than getting an error when trying to
+-- go the definition of:
+--
+--     type alias MyType myTypeVar = { field: Int }
+--                ^^^^^^
+--
+-- Where stuff marked with `^` is region the point is in.
+--
+findAliasAtExactPoint :: A.Position -> [A.Located Src.Alias] -> SearchResult
+findAliasAtExactPoint point =
+  findRegion point (\(Src.Alias (A.At region name) args type_) ->
+    if withinRegion point region then
+      FoundType
+        (A.At region
+          (Src.TType
+            region
+            name
+            (map (\(A.At varRegion varName) -> A.At varRegion (Src.TVar varName)) args)
+          )
+        )
+
+    else
+      FoundNothing
+  )
+
+-- Find alias TVar at exact point, nicer than getting an error when trying to
+-- go the definition of:
+--
+--     type alias MyType myTypeVar = { field: Int }
+--                       ^^^^^^^^^
+--
+-- Where stuff marked with `^` is region the point is in.
+--
+findAliasTVarAtExactPoint :: A.Position -> [A.Located Src.Alias] -> SearchResult
+findAliasTVarAtExactPoint point =
+  findRegion point (\(Src.Alias (A.At region _) vars type_) ->
+    if withinRegion point region then
+      List.find (\(A.At varRegion varName) -> withinRegion point varRegion) vars
+      & maybe FoundNothing (\(A.At varRegion varName) ->
+          FoundType (A.At varRegion (Src.TVar varName))
+        )
+
+    else
+      FoundNothing
+  )
 
 findDeclAtPoint :: A.Position -> Can.Decls -> SearchResult
 findDeclAtPoint point decls =
