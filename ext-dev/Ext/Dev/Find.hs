@@ -222,11 +222,59 @@ data SearchResult
 
 findTypeAtPoint :: A.Position -> Src.Module -> SearchResult
 findTypeAtPoint point srcMod =
+  -- TODO: check imports
+  -- TODO: check exports
+  -- TODO: check union variants
   findAnnotation point (Src._values srcMod)
-    & orFind (findUnion point) (Src._unions srcMod)
-    & orFind (findAlias point) (Src._aliases srcMod)
-    & orFind (findAliasAtExactPoint point) (Src._aliases srcMod)
-    & orFind (findAliasTVarAtExactPoint point) (Src._aliases srcMod)
+  & orFind (findUnion point) (Src._unions srcMod)
+  & orFind (findUnionAtExactPoint point) (Src._unions srcMod)
+  & orFind (findUnionTVarAtExactPoint point) (Src._unions srcMod)
+  & orFind (findAlias point) (Src._aliases srcMod)
+  & orFind (findAliasAtExactPoint point) (Src._aliases srcMod)
+  & orFind (findAliasTVarAtExactPoint point) (Src._aliases srcMod)
+
+
+-- Find union at exact point, nicer than getting an error when trying to
+-- go the definition of:
+--
+--     type MyType myTypeVar = MyVariant
+--          ^^^^^^
+--
+-- Where stuff marked with `^` is region the point is in.
+--
+findUnionAtExactPoint :: A.Position -> [A.Located Src.Union] -> SearchResult
+findUnionAtExactPoint point =
+  findRegion point (\(Src.Union (A.At region name) args variants) ->
+    if withinRegion point region then
+      FoundType
+        (A.At region
+          (Src.TType
+            region
+            name
+            (map (\(A.At varRegion varName) -> A.At varRegion (Src.TVar varName)) args)
+          )
+        )
+
+    else
+      FoundNothing
+  )
+
+-- Find union TVar at exact point, nicer than getting an error when trying to
+-- go the definition of:
+--
+--     type MyType myTypeVar = MyVariant
+--                 ^^^^^^^^^
+--
+-- Where stuff marked with `^` is region the point is in.
+--
+findUnionTVarAtExactPoint :: A.Position -> [A.Located Src.Union] -> SearchResult
+findUnionTVarAtExactPoint point =
+  findRegion point (\(Src.Union (A.At region _) vars variants) ->
+    List.find (\(A.At varRegion varName) -> withinRegion point varRegion) vars
+    & maybe FoundNothing (\(A.At varRegion varName) ->
+        FoundType (A.At varRegion (Src.TVar varName))
+      )
+  )
 
 
 -- Find alias at exact point, nicer than getting an error when trying to
@@ -265,14 +313,10 @@ findAliasAtExactPoint point =
 findAliasTVarAtExactPoint :: A.Position -> [A.Located Src.Alias] -> SearchResult
 findAliasTVarAtExactPoint point =
   findRegion point (\(Src.Alias (A.At region _) vars type_) ->
-    if withinRegion point region then
-      List.find (\(A.At varRegion varName) -> withinRegion point varRegion) vars
-      & maybe FoundNothing (\(A.At varRegion varName) ->
-          FoundType (A.At varRegion (Src.TVar varName))
-        )
-
-    else
-      FoundNothing
+    List.find (\(A.At varRegion varName) -> withinRegion point varRegion) vars
+    & maybe FoundNothing (\(A.At varRegion varName) ->
+        FoundType (A.At varRegion (Src.TVar varName))
+      )
   )
 
 findDeclAtPoint :: A.Position -> Can.Decls -> SearchResult
