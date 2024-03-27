@@ -151,6 +151,10 @@ definition root (Watchtower.Editor.PointLocation path point) = do
                 Right (Can.TAlias extCanMod name _ _) -> do
                   findExternalWith findFirstTypeNamed name id extCanMod
 
+                Right (Can.TVar name) ->
+                  let canMod = Canonicalize.Environment._home env in
+                  findExternalWith findFirstTypeNamed name id canMod
+
                 Right _ ->
                   pure (Left "FoundType unhandled.")
       where
@@ -574,20 +578,31 @@ findPatternIntroducing name pattern@(A.At _ pattern_) =
     inList =
       findFirstJust (findPatternIntroducing name)
 
+
 findFirstTypeNamed :: Name.Name -> Src.Module -> Maybe (A.Located ())
 findFirstTypeNamed name mod =
   findFirstJust findAlias (Src._aliases mod)
-    <|> findFirstJust findUnion (Src._unions mod)
-  where
-    findAlias (A.At region (Src.Alias (A.At _ aliasName) _ _)) =
-      if name == aliasName
-        then Just (A.At region ())
-        else Nothing
+  <|> findFirstJust findUnion (Src._unions mod)
 
-    findUnion (A.At region (Src.Union (A.At _ unionName) _ _)) =
-      if name == unionName
-        then Just (A.At region ())
-        else Nothing
+  where
+
+    findAlias (A.At region (Src.Alias (A.At _ aliasName) vars _)) =
+      if name == aliasName then
+        Just (A.At region ())
+
+      else
+        List.find (\(A.At _ varName) -> name == varName) vars
+        & fmap (\(A.At varRegion _)-> A.At varRegion ())
+
+
+    findUnion (A.At region (Src.Union (A.At _ unionName) vars _)) =
+      if name == unionName then
+        Just (A.At region ())
+
+      else
+        List.find (\(A.At _ varName) -> name == varName) vars
+        & fmap (\(A.At varRegion _)-> A.At varRegion ())
+
 
 -- Helpers
 
