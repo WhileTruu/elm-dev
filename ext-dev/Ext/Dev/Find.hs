@@ -454,72 +454,49 @@ refineTypeMatch point type_ =
 
 -- Classify matched expression or type so we know where to search
 
+
 data LocatedValue
   = Local Name
   | External ModuleName.Canonical Name
   | Ctor ModuleName.Canonical Name
 
+
 getLocatedDetails :: Can.Expr -> Maybe LocatedValue
 getLocatedDetails (A.At region expr) =
   case expr of
-    Can.VarLocal name ->
-      Just (Local name)
-    Can.VarTopLevel mod name ->
-      Just (External mod name)
-    Can.VarKernel oneName twoName ->
-      Nothing
-    Can.VarForeign mod name ann ->
-      Just (External mod name)
-    Can.VarCtor _ mod name idx ann ->
-      Just (Ctor mod name)
-    Can.VarDebug mod name ann ->
-      Just (External mod name)
-    Can.VarOperator firstName mod name ann ->
-      Just (External mod name)
-    Can.Chr _ ->
-      Nothing
-    Can.Str _ ->
-      Nothing
-    Can.Int i ->
-      Nothing
-    Can.Float f ->
-      Nothing
-    Can.List listExprs ->
-      Nothing
-    Can.Negate expr ->
-      Nothing
-    Can.Binop otherName mod name ann exprOne exprTwo ->
-      Nothing
-    Can.Lambda patterns expr ->
-      Nothing
-    Can.Call expr exprs ->
-      Nothing
-    Can.If branches return ->
-      Nothing
-    Can.Let def expr ->
-      Nothing
-    Can.LetRec defs expr ->
-      Nothing
-    Can.LetDestruct pattern one two ->
-      Nothing
-    Can.Case expr caseBranch ->
-      Nothing
-    Can.Accessor name ->
-      Nothing
-    Can.Access expr locatedName ->
-      Nothing
-    Can.Update name expr fieldUpdates ->
-      Nothing
-    Can.Record fields ->
-      Nothing
-    Can.Unit ->
-      Nothing
-    Can.Tuple one two three ->
-      Nothing
-    Can.Shader shader types ->
-      Nothing
+    Can.VarLocal name ->                                Just (Local name)
+    Can.VarTopLevel mod name ->                         Just (External mod name)
+    Can.VarKernel oneName twoName ->                    Nothing
+    Can.VarForeign mod name ann ->                      Just (External mod name)
+    Can.VarCtor _ mod name idx ann ->                   Just (Ctor mod name)
+    Can.VarDebug mod name ann ->                        Just (External mod name)
+    Can.VarOperator firstName mod name ann ->           Just (External mod name)
+    Can.Chr _ ->                                        Nothing
+    Can.Str _ ->                                        Nothing
+    Can.Int i ->                                        Nothing
+    Can.Float f ->                                      Nothing
+    Can.List listExprs ->                               Nothing
+    Can.Negate expr ->                                  Nothing
+    Can.Binop otherName mod name ann exprOne exprTwo -> Nothing
+    Can.Lambda patterns expr ->                         Nothing
+    Can.Call expr exprs ->                              Nothing
+    Can.If branches return ->                           Nothing
+    Can.Let def expr ->                                 Nothing
+    Can.LetRec defs expr ->                             Nothing
+    Can.LetDestruct pattern one two ->                  Nothing
+    Can.Case expr caseBranch ->                         Nothing
+    Can.Accessor name ->                                Nothing
+    Can.Access expr locatedName ->                      Nothing
+    Can.Update name expr fieldUpdates ->                Nothing
+    Can.Record fields ->                                Nothing
+    Can.Unit ->                                         Nothing
+    Can.Tuple one two three ->                          Nothing
+    Can.Shader shader types ->                          Nothing
+
+
 
 -- Find the definition
+
 
 findFirstValueNamed :: Name.Name -> [A.Located Src.Value] -> Maybe (A.Located Src.Value)
 findFirstValueNamed name list =
