@@ -710,53 +710,6 @@ references root (Watchtower.Editor.PointLocation path point) = do
                 Right _ ->
                   pure (Left "FoundType unhandled.")
 
-      where
-        findExternalWith findFn name listAccess canMod = do
-          details <- Ext.CompileProxy.loadProject root
-
-          case Ext.Dev.Project.lookupModulePath details (ModuleName._module canMod) of
-            Nothing ->
-              case Ext.Dev.Project.lookupPkgName details (ModuleName._module canMod) of
-                Nothing ->
-                  pure (Left "Package lookup failed")
-
-                Just pkgName -> do
-                  maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
-
-                  case maybeCurrentVersion of
-                    Nothing ->
-                      pure (Left "Failed to find package version.")
-
-                    Just version -> do
-                      packageCache <- Stuff.getPackageCache
-                      let home = Stuff.package packageCache pkgName version
-                      let path = home Path.</> "src" Path.</> ModuleName.toFilePath (ModuleName._module canMod) Path.<.> "elm"
-                      loadedFile <- Ext.CompileProxy.loadPkgFileSource pkgName home path
-
-                      case loadedFile of
-                        Right (_, sourceMod) -> do
-                          listAccess sourceMod
-                            & findFn name
-                            & fmap Right
-                            & Maybe.fromMaybe (Left "Could not find region for package.")
-                            & pure
-
-                        Left err -> do
-                            pure (Left "Failed to find package version.")
-
-            Just targetPath -> do
-              loadedFile <- Ext.CompileProxy.loadFileSource root targetPath
-              case loadedFile of
-                Right (_, sourceMod) -> do
-                  listAccess sourceMod
-                    & findFn name
-                    & fmap Right
-                    & Maybe.fromMaybe (Left $ "I was trying to find a function corresponding to \"" ++ Name.toChars name ++ "\", and failed, obviously.")
-                    & pure
-
-                Left err ->
-                    pure (Left (show err))
-
 findAllValuesNamed :: [A.Located Src.Value] -> Name.Name -> [A.Located Src.Value] -> [A.Located Src.Value]
 findAllValuesNamed found name list =
   case list of
