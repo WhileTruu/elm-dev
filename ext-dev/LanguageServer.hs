@@ -144,6 +144,11 @@ data Request
   = Initialize {reqId :: Int, rootPath :: FilePath}
   | Shutdown {reqId :: Int}
   | Definition {reqId :: Int, filePath :: FilePath, position :: Reporting.Annotation.Position}
+  | References 
+    { reqId :: Int
+    , filePath :: FilePath
+    , position :: Reporting.Annotation.Position
+    }
   | Exit
   | Initialized
   | DidSave {filePath :: FilePath}
@@ -192,6 +197,22 @@ instance Aeson.FromJSON Request where
           <*> pure filePath
           <*> pure (Reporting.Annotation.Position (row + 1) (col + 1))
 
+      "textDocument/references" -> do
+        params <- v .: "params"
+
+        textDocument <- params .: "textDocument"
+        uri <- textDocument .: "uri"
+        let filePath = drop 7 uri
+
+        position <- params .: "position"
+        let row = fromIntegral $ line position 
+        let col = fromIntegral $ character position 
+
+        References
+          <$> v .: "id"
+          <*> pure filePath
+          <*> pure (Reporting.Annotation.Position (row + 1) (col + 1))
+
       "textDocument/didSave" -> do
         params <- v .: "params"
 
@@ -225,6 +246,9 @@ handleRequest state@(State mProjects) request =
                 [ "save" Aeson..= True
                 , "openClose" Aeson..= True
                 ]
+            , "referencesProvider" Aeson..= Aeson.object 
+              [ "workDoneProgress" Aeson..= True
+              ]
             ]
           , "serverInfo" Aeson..= Aeson.object
             [ "name" Aeson..= ("my-elm-ls" :: String)
@@ -281,7 +305,7 @@ handleRequest state@(State mProjects) request =
         Left err -> do
           respondErr reqId err
 
-        Right (Ext.Dev.Find.DefinitionResult filePath (Ann.Region (Ann.Position sr sc) (Ann.Position er ec))) -> do
+        Right (Ext.Dev.Find.PointRegion filePath (Ann.Region (Ann.Position sr sc) (Ann.Position er ec))) -> do
           respond reqId $
             Aeson.object
               [ "uri" Aeson..= ("file://" ++ filePath :: String)
@@ -296,6 +320,42 @@ handleRequest state@(State mProjects) request =
                   ]
                 ]
               ]
+
+    References {reqId = reqId, filePath = filePath, position = position } -> do
+      sendCreateWorkDoneProgress "references-token"
+      sendProgressBegin "references-token" "🔍 Finding references"
+
+      root <- fmap (Maybe.fromMaybe ".") (getRoot filePath state)
+      answer <- Ext.Dev.Find.references root (Watchtower.Editor.PointLocation filePath position)
+
+      sendProgressEnd "references-token"
+
+      case answer of
+        Left err -> do
+          respondErr reqId err
+
+        Right pointRegions ->
+          respond reqId
+            (pointRegions
+              & map 
+                (\(Ext.Dev.Find.PointRegion filePath (Ann.Region (Ann.Position sr sc) (Ann.Position er ec))) ->
+                  Aeson.object
+                    [ "uri" Aeson..= ("file://" ++ filePath :: String)
+                    , "range" Aeson..= Aeson.object
+                      [ "start" Aeson..= Aeson.object
+                        [ "line" Aeson..= (sr - 1)
+                        , "character" Aeson..= (sc - 1)
+                        ]
+                      , "end" Aeson..= Aeson.object
+                        [ "line" Aeson..= (er - 1)
+                        , "character" Aeson..= (ec - 1)
+                        ]
+                      ]
+                    ]
+                ) 
+              & Aeson.toJSON
+            )
+            
 
     DidSave {filePath = filePath} -> do
       sendCreateWorkDoneProgress "compile-progress"

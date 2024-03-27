@@ -2,9 +2,10 @@
 
 module Ext.Dev.Find
   ( definition
+  , references
   , usedModules
   , encodeResult
-  , DefinitionResult (..)
+  , PointRegion (..)
   ) 
 where
 
@@ -49,16 +50,38 @@ import qualified Ext.Dev.Project
 import qualified Stuff
 import qualified System.FilePath as Path
 import qualified Ext.Dev.Package
+import qualified Ext.Dev.Usage
+import qualified Control.Monad
+import qualified Ext.Dev.Help
+import qualified Ext.Dev.Explain
 
 {- Find Definition -}
 
-data DefinitionResult =
-  DefinitionResult
+
+data PointRegion =
+  PointRegion
     { path :: FilePath
     , region :: A.Region
     }
 
-definition :: FilePath -> Watchtower.Editor.PointLocation -> IO (Either String DefinitionResult)
+
+encodeResult :: Either String PointRegion -> Json.Encode.Value
+encodeResult result =
+  case result of
+    Left _ ->
+      Json.Encode.null
+    Right (PointRegion path region) ->
+      Json.Encode.object
+        [ ( "definition",
+            Json.Encode.object
+              [ ("region", Watchtower.Editor.encodeRegion region),
+                ("path", Json.Encode.string (Json.String.fromChars path))
+              ]
+          )
+        ]
+
+
+definition :: FilePath -> Watchtower.Editor.PointLocation -> IO (Either String PointRegion)
 definition root (Watchtower.Editor.PointLocation path point) = do
   (Ext.CompileProxy.Single source warnings interfaces canonical compiled) <- Ext.CompileProxy.loadSingle root path
   case source of
@@ -68,6 +91,7 @@ definition root (Watchtower.Editor.PointLocation path point) = do
     Right srcMod -> do
       let foundType = findTypeAtPoint point srcMod
 
+      appendFile "/tmp/lsp.log" ("point: " ++ show point ++ "\n  type: " ++ show foundType ++ "\n\n")
       found <-
         case foundType of
           FoundNothing -> do
@@ -83,7 +107,7 @@ definition root (Watchtower.Editor.PointLocation path point) = do
 
       case found of
         FoundNothing -> do
-          pure (Left $ "Found nothing for: " ++ show srcMod)
+          pure (Left $ "Found nothing for: " ++ show (Src._name srcMod))
 
         FoundExpr expr patterns -> do
           case getLocatedDetails expr of
@@ -92,7 +116,7 @@ definition root (Watchtower.Editor.PointLocation path point) = do
 
             Just (Local localName) ->
               findFirstPatternIntroducing localName patterns
-                & fmap (\(A.At region _) -> Right (DefinitionResult path region))
+                & fmap (\(A.At region _) -> Right (PointRegion path region))
                 & Maybe.fromMaybe (Left "Not found")
                 & pure
 
@@ -156,7 +180,7 @@ definition root (Watchtower.Editor.PointLocation path point) = do
                         Right (_, sourceMod) -> do
                           listAccess sourceMod
                             & findFn name
-                            & fmap (\(A.At region _) -> Right (DefinitionResult path region))
+                            & fmap (\(A.At region _) -> Right (PointRegion path region))
                             & Maybe.fromMaybe (Left "Could not find region for package.")
                             & pure
 
@@ -169,27 +193,13 @@ definition root (Watchtower.Editor.PointLocation path point) = do
                 Right (_, sourceMod) -> do
                   listAccess sourceMod
                     & findFn name
-                    & fmap (\(A.At region _) -> Right (DefinitionResult targetPath region))
+                    & fmap (\(A.At region _) -> Right (PointRegion targetPath region))
                     & Maybe.fromMaybe (Left $ "I was trying to find a function corresponding to \"" ++ Name.toChars name ++ "\", and failed, obviously.")
                     & pure
 
                 Left err ->
                     pure (Left (show err))
 
-encodeResult :: Either String DefinitionResult -> Json.Encode.Value
-encodeResult result =
-  case result of
-    Left _ ->
-      Json.Encode.null
-    Right (DefinitionResult path region) ->
-      Json.Encode.object
-        [ ( "definition",
-            Json.Encode.object
-              [ ("region", Watchtower.Editor.encodeRegion region),
-                ("path", Json.Encode.string (Json.String.fromChars path))
-              ]
-          )
-        ]
 
 
 -- Match the AST node at the specified position
@@ -609,3 +619,436 @@ usedModules root path = do
     pure (fmap Ext.Dev.Find.Canonical.usedModules canonical)
     
     
+
+{-| References -}
+
+references :: FilePath -> Watchtower.Editor.PointLocation -> IO (Either String [PointRegion])
+references root (Watchtower.Editor.PointLocation path point) = do
+  (Ext.CompileProxy.Single source warnings interfaces canonical compiled) <- Ext.CompileProxy.loadSingle root path
+  case source of
+    Left err ->
+       pure (Left (show err))
+
+    Right srcMod -> do
+      let foundType = findTypeAtPoint point srcMod
+
+      found <-
+        case foundType of
+          FoundNothing -> do
+            case canonical of
+              Just canMod ->
+                  pure $ findDeclAtPoint point (Can._decls canMod)
+
+              Nothing ->
+                  pure foundType
+
+          existing ->
+            pure existing
+
+      appendFile "/tmp/lsp.log" ("    point: " ++ show point ++ "\n    type: " ++ show found ++ "\n\n")
+
+      case found of
+        FoundNothing -> do
+          pure (Left $ "Found nothing for: " ++ show srcMod)
+
+        FoundExpr expr patterns -> do
+          case getLocatedDetails expr of
+            Nothing ->
+                pure (Left "Found no location details for expr.")
+
+            Just (Local localName) -> do
+              -- TODO: Implement
+              pure (Left "BOOOOO.")
+
+            Just (External extCanMod name) -> do
+              -- TODO: Implement
+              pure (Left "BOOOOO 2.")
+
+
+            Just (Ctor extCanMod name) ->
+              -- findExternalWith findFirstCtorNamed name Src._unions extCanMod
+              pure (Left "Not implemented")
+
+        FoundPattern (A.At _ (Can.PCtor extCanMod _ _ ctorName _ _)) -> do
+          -- findExternalWith findFirstCtorNamed ctorName Src._unions extCanMod
+          pure (Left "Not implemented")
+
+        FoundPattern pattern ->
+          pure (Left ("Found pattern: " ++ show pattern))
+
+        FoundType tipe -> do
+          canonicalizationEnvResult <- Ext.CompileProxy.loadCanonicalizeEnv root path srcMod
+          case canonicalizationEnvResult of
+            Nothing ->
+              pure (Left "did not canonicalize env")
+
+            Just env -> do
+              let (_, eitherCanType) = Reporting.Result.run $ Canonicalize.Type.canonicalize env tipe
+
+              case eitherCanType of
+                Left err ->
+                  pure (Left "FoundType canonicalization error.")
+
+                Right (Can.TType extCanMod name _) -> do
+                  details <- Ext.CompileProxy.loadProject root
+
+                  let mod = ModuleName._module extCanMod
+                  let importers = Ext.Dev.Project.importersOf details mod
+
+                  usages 
+                    <- Control.Monad.foldM 
+                        (lookupUsageOfType root details mod name) 
+                        [] 
+                        importers
+
+                  pure (Right usages)
+
+
+
+                Right (Can.TAlias extCanMod name _ _) -> do
+                  details <- Ext.CompileProxy.loadProject root
+
+                  case Ext.Dev.Project.lookupModulePath details (ModuleName._module extCanMod) of
+                    Nothing -> pure (Left "Could not find module")
+                    Just path -> do
+                      usages <- Control.Monad.foldM (lookupUsageOfType root details (ModuleName._module extCanMod) name) [] (Set.singleton (ModuleName._module extCanMod))
+
+                      pure (Right usages)
+
+                Right _ ->
+                  pure (Left "FoundType unhandled.")
+
+      where
+        findExternalWith findFn name listAccess canMod = do
+          details <- Ext.CompileProxy.loadProject root
+
+          case Ext.Dev.Project.lookupModulePath details (ModuleName._module canMod) of
+            Nothing ->
+              case Ext.Dev.Project.lookupPkgName details (ModuleName._module canMod) of
+                Nothing ->
+                  pure (Left "Package lookup failed")
+
+                Just pkgName -> do
+                  maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
+
+                  case maybeCurrentVersion of
+                    Nothing ->
+                      pure (Left "Failed to find package version.")
+
+                    Just version -> do
+                      packageCache <- Stuff.getPackageCache
+                      let home = Stuff.package packageCache pkgName version
+                      let path = home Path.</> "src" Path.</> ModuleName.toFilePath (ModuleName._module canMod) Path.<.> "elm"
+                      loadedFile <- Ext.CompileProxy.loadPkgFileSource pkgName home path
+
+                      case loadedFile of
+                        Right (_, sourceMod) -> do
+                          listAccess sourceMod
+                            & findFn name
+                            & fmap Right
+                            & Maybe.fromMaybe (Left "Could not find region for package.")
+                            & pure
+
+                        Left err -> do
+                            pure (Left "Failed to find package version.")
+
+            Just targetPath -> do
+              loadedFile <- Ext.CompileProxy.loadFileSource root targetPath
+              case loadedFile of
+                Right (_, sourceMod) -> do
+                  listAccess sourceMod
+                    & findFn name
+                    & fmap Right
+                    & Maybe.fromMaybe (Left $ "I was trying to find a function corresponding to \"" ++ Name.toChars name ++ "\", and failed, obviously.")
+                    & pure
+
+                Left err ->
+                    pure (Left (show err))
+
+findAllValuesNamed :: [A.Located Src.Value] -> Name.Name -> [A.Located Src.Value] -> [A.Located Src.Value]
+findAllValuesNamed found name list =
+  case list of
+    [] -> 
+      found
+
+    (top@(A.At _ ((Src.Value (A.At _ valName) _ _ _))) : remain) ->
+      if name == valName then 
+        findAllValuesNamed (top : found) name remain
+        else findAllValuesNamed found name remain
+
+
+
+
+
+data TypeUsage = 
+    TypeUsage 
+        { _usageName :: A.Located Name
+        , _usageDef :: Can.Def
+        , _usageType :: Can.Type
+        , _isExposed :: Bool
+        }
+        deriving (Show)
+
+-- Finds moderately well for type aliases
+-- not for custom types that are not opaque wrappers for w/e reason
+lookupUsageOfType :: 
+    String 
+    -> Elm.Details.Details 
+    -> ModuleName.Raw 
+    -> Name.Name
+    -> [PointRegion]
+    -> ModuleName.Raw 
+    -> IO [PointRegion]
+lookupUsageOfType root details originalModule targetTypeName foundMap importerModuleName = do
+  case Ext.Dev.Project.lookupModulePath details importerModuleName of 
+    Nothing -> do
+      case Ext.Dev.Project.lookupPkgName details importerModuleName of
+        Nothing ->
+          -- This should probably be logged
+          pure foundMap
+
+        Just pkgName -> do
+          maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
+
+          case maybeCurrentVersion of
+            Nothing ->
+              -- This should probably be logged
+              pure foundMap
+
+            Just version -> do
+              packageCache <- Stuff.getPackageCache
+              let home = Stuff.package packageCache pkgName version
+              let path = home Path.</> "src" Path.</> ModuleName.toFilePath importerModuleName Path.<.> "elm"
+              loadedFile <- Ext.CompileProxy.loadPkgFileSource pkgName home path
+
+              case loadedFile of
+                Right (_, sourceMod) -> do
+                  let importers = Ext.Dev.Project.importersOf details importerModuleName
+                  Control.Monad.foldM (lookupUsageOfType root details originalModule targetTypeName) foundMap importers
+
+                Left err -> do
+                  -- This should probably be logged
+                  pure foundMap
+        
+    Just path -> do
+      single <- Ext.CompileProxy.loadSingle root path
+      let (Ext.CompileProxy.Single source warnings maybeInterfaces maybeCanonical compiled) = single
+      
+      case maybeCanonical of
+        Nothing -> do
+             -- This should probably be logged
+            pure foundMap
+
+        Just (Can.Module name exports docs decls unions aliases binops effects) -> do
+            let thereIsAnExposedAlias = hasExposedAlias originalModule targetTypeName exports aliases
+            foundMapWithAliases 
+              <- if thereIsAnExposedAlias then do 
+                   let importers = Ext.Dev.Project.importersOf details (ModuleName._module name)
+                   Control.Monad.foldM (lookupUsageOfType root details originalModule targetTypeName) foundMap importers
+                 else do
+                   pure foundMap
+
+            let missingTypes = Ext.Dev.Help.toMissingTypeLookup single
+            let foundTypeUsages = usedValueInDecls exports missingTypes originalModule targetTypeName decls []
+            case foundTypeUsages of
+              [] ->
+                pure foundMapWithAliases
+
+              _ ->
+                if not thereIsAnExposedAlias then do
+                    -- If there was an exposed alias, we're already searching downstream modules
+                    let importers = Ext.Dev.Project.importersOf details (ModuleName._module name)
+                    finalFound <- Control.Monad.foldM (lookupUsageOfType root details originalModule targetTypeName) foundMapWithAliases importers
+                    
+                    pure (map (\a -> PointRegion path a) foundTypeUsages ++ finalFound)
+                    
+
+                else
+                    pure (map (\a -> PointRegion path a) foundTypeUsages ++ foundMapWithAliases)
+
+
+hasExposedAlias originalMpodule targetTypeName exports aliases =
+    Map.foldrWithKey
+        (\aliasName (Can.Alias names aliasType) found ->
+            if found then
+                found
+            else 
+                typeIsUsed originalMpodule targetTypeName aliasType
+                    && Ext.Dev.Help.isExposed aliasName exports
+        ) 
+        False 
+        aliases
+
+
+usedValueInDecls ::
+    Can.Exports 
+    -> Map.Map Name.Name Can.Type
+    -> ModuleName.Raw 
+    -> Name.Name
+    -> Can.Decls 
+    -> [ A.Region ]
+    -> [ A.Region ]
+usedValueInDecls exports missingTypes moduleName targetTypeName decls found =
+    case decls of
+        Can.Declare def moarDecls ->
+            (usedTypeInDef exports missingTypes moduleName targetTypeName def found)
+                & usedValueInDecls exports missingTypes moduleName targetTypeName moarDecls
+        
+        Can.DeclareRec def defs moarDecls ->
+            List.foldl (\gathered innerDef -> usedTypeInDef exports missingTypes moduleName targetTypeName innerDef gathered) 
+                found (def : defs)
+                & usedValueInDecls exports missingTypes moduleName targetTypeName moarDecls
+
+        Can.SaveTheEnvironment ->
+            found
+
+
+usedTypeInDef ::
+    Can.Exports 
+    -> Map.Map Name.Name Can.Type
+    -> ModuleName.Raw 
+    -> Name.Name
+    -> Can.Def
+    -> [ A.Region ]
+    -> [ A.Region ]
+usedTypeInDef exports missingTypes moduleName targetTypeName def found =
+    case def of
+        Can.Def locatedName patterns expr ->
+            case Map.lookup (A.toValue locatedName) missingTypes of
+                Nothing -> findReferencesInExpression moduleName targetTypeName expr found
+
+                Just tipe ->
+                    if typeIsUsed moduleName targetTypeName tipe then
+                        A.toRegion locatedName : findReferencesInExpression moduleName targetTypeName expr found
+
+                    else
+                        findReferencesInExpression  moduleName targetTypeName expr found
+
+        Can.TypedDef locatedName freeVars patternTypes expr returnTipe ->
+            let 
+                tipe = Ext.Dev.Help.toFunctionType (fmap snd patternTypes) returnTipe
+            in
+            if typeIsUsed moduleName targetTypeName tipe then
+                A.toRegion locatedName : findReferencesInExpression moduleName targetTypeName expr found
+
+            else
+                findReferencesInExpression moduleName targetTypeName expr found
+
+
+typeIsUsed :: ModuleName.Raw -> Name.Name -> Can.Type -> Bool
+typeIsUsed targetModuleName targetTypeName canType =
+    case canType of 
+        Can.TLambda one two ->
+            typeIsUsed targetModuleName targetTypeName one 
+                || typeIsUsed targetModuleName targetTypeName two
+
+        Can.TVar _ ->
+            False
+
+        Can.TType moduleName name children ->
+            if ModuleName._module moduleName == targetModuleName 
+                && name == targetTypeName 
+            then 
+                True
+            else 
+                List.any (typeIsUsed targetModuleName targetTypeName) children
+
+        Can.TRecord fieldMap maybeName ->
+            case maybeName of
+                Just name ->
+                    name == targetTypeName 
+
+                Nothing ->
+                    False
+                      -- Map.foldr
+                      --   (\(Can.FieldType _ fieldType) isFound ->
+                      --       if isFound then 
+                      --           isFound 
+                      --       else 
+                      --           typeIsUsed targetModuleName targetTypeName fieldType
+                      --   ) False fieldMap 
+
+        Can.TUnit ->
+            False
+
+        Can.TTuple one two Nothing ->
+           typeIsUsed targetModuleName targetTypeName one 
+                || typeIsUsed targetModuleName targetTypeName two
+
+        Can.TTuple one two (Just three) ->
+            typeIsUsed targetModuleName targetTypeName one 
+                || typeIsUsed targetModuleName targetTypeName two
+                || typeIsUsed targetModuleName targetTypeName three
+
+        Can.TAlias moduleName name vars (Can.Holey holeyType) ->
+             if ModuleName._module moduleName == targetModuleName 
+                && name == targetTypeName 
+            then 
+                True
+            else 
+                typeIsUsed targetModuleName targetTypeName holeyType
+
+        Can.TAlias moduleName name vars (Can.Filled holeyType) ->
+            if ModuleName._module moduleName == targetModuleName 
+                && name == targetTypeName 
+            then 
+                True
+            else 
+                typeIsUsed targetModuleName targetTypeName holeyType
+
+
+findReferencesInExpression :: ModuleName.Raw -> Name.Name -> Can.Expr -> [ A.Region ] -> [ A.Region ]
+findReferencesInExpression targetModuleName targetTypeName (A.At region expr) found =
+  case expr of
+    Can.VarLocal name -> 
+      if name == targetTypeName then 
+        region : found
+      else 
+        found
+    Can.VarTopLevel mod name ->
+      if ModuleName._module mod == targetModuleName && name == targetTypeName then 
+        region : found
+      else 
+        found
+    Can.VarKernel oneName twoName -> found
+    Can.VarForeign mod name ann -> 
+      if ModuleName._module mod == targetModuleName && name == targetTypeName then 
+        region : found
+      else 
+        found
+
+    Can.VarCtor _ mod name idx ann ->
+      if ModuleName._module mod == targetModuleName && name == targetTypeName then 
+        region : found
+      else 
+        found
+    Can.VarDebug mod name ann -> found
+    Can.VarOperator firstName mod name ann -> found
+    Can.Chr _ -> found
+    Can.Str _ -> found
+    Can.Int i -> found
+    Can.Float f -> found
+    Can.List listExprs -> found
+    Can.Negate expr -> found
+    Can.Binop otherName mod name ann exprOne exprTwo ->
+      findReferencesInExpression targetModuleName targetTypeName exprOne 
+        (findReferencesInExpression targetModuleName targetTypeName exprTwo found)
+    Can.Lambda patterns expr -> findReferencesInExpression targetModuleName targetTypeName expr found
+    Can.Call expr exprs ->
+      List.foldl (\gathered innerExpr -> findReferencesInExpression targetModuleName targetTypeName innerExpr gathered) found exprs
+    Can.If branches return ->
+      List.foldl (\gathered (one, two) -> 
+          findReferencesInExpression targetModuleName targetTypeName one 
+            (findReferencesInExpression targetModuleName targetTypeName two gathered)
+        ) found branches
+    Can.Let def expr -> found
+    Can.LetRec defs expr -> found
+    Can.LetDestruct pattern one two -> found
+    Can.Case expr caseBranch -> found
+    Can.Accessor name -> found
+    Can.Access expr locatedName -> found
+    Can.Update name expr fieldUpdates -> found
+    Can.Record fields -> found
+    Can.Unit -> found
+    Can.Tuple one two three -> found
+    Can.Shader shader types -> found
