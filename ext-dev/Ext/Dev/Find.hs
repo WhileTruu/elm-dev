@@ -136,7 +136,7 @@ definition root (Watchtower.Editor.PointLocation path point) = do
           canonicalizationEnvResult <- Ext.CompileProxy.loadCanonicalizeEnv root path srcMod
           case canonicalizationEnvResult of
             Nothing ->
-              pure (Left "did not canonicalize env")
+              pure (Left ("🚨 No canonical env. Found type: " ++ show tipe))
 
             Just env -> do
               let (_, eitherCanType) = Reporting.Result.run $ Canonicalize.Type.canonicalize env tipe
@@ -155,8 +155,8 @@ definition root (Watchtower.Editor.PointLocation path point) = do
                   let canMod = Canonicalize.Environment._home env in
                   findExternalWith findFirstTypeNamed name id canMod
 
-                Right _ ->
-                  pure (Left "FoundType unhandled.")
+                Right unhandled ->
+                  pure (Left ("❌ Unhandled type: " ++ show unhandled))
       where
         findExternalWith findFn name listAccess canMod = do
           details <- Ext.CompileProxy.loadProject root
