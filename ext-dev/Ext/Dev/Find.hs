@@ -152,8 +152,10 @@ definition root (Watchtower.Editor.PointLocation path point) = do
                   findExternalWith findFirstTypeNamed name id extCanMod
 
                 Right (Can.TVar name) ->
-                  let canMod = Canonicalize.Environment._home env in
-                  findExternalWith findFirstTypeNamed name id canMod
+                  findTVar point name srcMod
+                  & fmap (\(A.At region _) -> Right (PointRegion path region))
+                  & Maybe.fromMaybe (Left "❌ Found TVar type, but not it's location!?")
+                  & pure
 
                 Right unhandled ->
                   pure (Left ("❌ Unhandled type: " ++ show unhandled))
@@ -564,21 +566,32 @@ findFirstTypeNamed name mod =
   where
 
     findAlias (A.At region (Src.Alias (A.At _ aliasName) vars _)) =
-      if name == aliasName then
-        Just (A.At region ())
-
-      else
-        List.find (\(A.At _ varName) -> name == varName) vars
-        & fmap (\(A.At varRegion _)-> A.At varRegion ())
-
+      if name == aliasName then Just (A.At region ()) else Nothing
 
     findUnion (A.At region (Src.Union (A.At _ unionName) vars _)) =
-      if name == unionName then
-        Just (A.At region ())
+      if name == unionName then Just (A.At region ()) else Nothing
 
-      else
-        List.find (\(A.At _ varName) -> name == varName) vars
+
+findTVar :: A.Position -> Name.Name -> Src.Module -> Maybe (A.Located ())
+findTVar point name mod =
+  findFirstJust findAlias (Src._aliases mod)
+  <|> findFirstJust findUnion (Src._unions mod)
+
+  where
+
+    findAlias (A.At region (Src.Alias (A.At _ _) vars _)) =
+      if withinRegion point region then
+        List.find (\(A.At varRegion varName) -> withinRegion point region && name == varName) vars
         & fmap (\(A.At varRegion _)-> A.At varRegion ())
+      else
+        Nothing
+
+    findUnion (A.At region (Src.Union (A.At _ unionName) vars _)) =
+      if withinRegion point region then
+        List.find (\(A.At varRegion varName) -> withinRegion point region && name == varName) vars
+        & fmap (\(A.At varRegion _)-> A.At varRegion ())
+      else
+        Nothing
 
 
 -- Helpers
