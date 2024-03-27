@@ -626,53 +626,29 @@ references root (Watchtower.Editor.PointLocation path point) = do
 
       found <-
         case foundType of
-          FoundNothing -> do
+          FoundNothing ->
             case canonical of
-              Just canMod ->
-                  pure $ findDeclAtPoint point (Can._decls canMod)
-
-              Nothing ->
-                  pure foundType
-
-          existing ->
-            pure existing
+              Just canMod -> pure $ findDeclAtPoint point (Can._decls canMod)
+              Nothing -> pure foundType
+          existing -> pure existing
 
       appendFile "/tmp/lsp.log" ("    point: " ++ show point ++ "\n    type: " ++ show found ++ "\n\n")
 
       case found of
-        FoundNothing -> do
-          pure (Left $ "Found nothing for: " ++ show srcMod)
-
+        FoundNothing -> pure (Left $ "Found nothing for: " ++ show srcMod)
         FoundExpr expr patterns -> do
           case getLocatedDetails expr of
-            Nothing ->
-                pure (Left "Found no location details for expr.")
-
-            Just (Local localName) -> do
-              -- TODO: Implement
-              pure (Left "BOOOOO.")
-
-            Just (External extCanMod name) -> do
-              -- TODO: Implement
-              pure (Left "BOOOOO 2.")
-
-
-            Just (Ctor extCanMod name) ->
-              -- findExternalWith findFirstCtorNamed name Src._unions extCanMod
-              pure (Left "Not implemented")
-
-        FoundPattern (A.At _ (Can.PCtor extCanMod _ _ ctorName _ _)) -> do
-          -- findExternalWith findFirstCtorNamed ctorName Src._unions extCanMod
-          pure (Left "Not implemented")
-
-        FoundPattern pattern ->
-          pure (Left ("Found pattern: " ++ show pattern))
+            Nothing -> pure (Left "Found no location details for expr.")
+            Just (Local localName) -> pure (Left "BOOOOO.")
+            Just (External extCanMod name) -> pure (Left "BOOOOO 2.")
+            Just (Ctor extCanMod name) -> pure (Left "Not implemented")
+        FoundPattern (A.At _ (Can.PCtor extCanMod _ _ ctorName _ _)) -> pure (Left "Not implemented")
+        FoundPattern pattern -> pure (Left ("Found pattern: " ++ show pattern))
 
         FoundType tipe -> do
           canonicalizationEnvResult <- Ext.CompileProxy.loadCanonicalizeEnv root path srcMod
           case canonicalizationEnvResult of
-            Nothing ->
-              pure (Left "did not canonicalize env")
+            Nothing -> pure (Left "did not canonicalize env")
 
             Just env -> do
               let (_, eitherCanType) = Reporting.Result.run $ Canonicalize.Type.canonicalize env tipe
@@ -683,19 +659,14 @@ references root (Watchtower.Editor.PointLocation path point) = do
 
                 Right (Can.TType extCanMod name _) -> do
                   details <- Ext.CompileProxy.loadProject root
-
                   let mod = ModuleName._module extCanMod
                   let importers = Ext.Dev.Project.importersOf details mod
 
-                  usages 
-                    <- Control.Monad.foldM 
-                        (lookupUsageOfType root details mod name) 
-                        [] 
-                        importers
-
-                  pure (Right usages)
-
-
+                  Control.Monad.foldM
+                    (lookupUsageOfType root details mod name)
+                    []
+                    importers
+                  & fmap Right
 
                 Right (Can.TAlias extCanMod name _ _) -> do
                   details <- Ext.CompileProxy.loadProject root
