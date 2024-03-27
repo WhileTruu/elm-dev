@@ -119,9 +119,10 @@ definition root (Watchtower.Editor.PointLocation path point) = do
 
             Just (Local localName) ->
               findFirstPatternIntroducing localName patterns
-                & fmap (\(A.At region _) -> Right (PointRegion path region))
-                & Maybe.fromMaybe (Left "Not found")
-                & pure
+              & maybe (Left "Not found") (\(A.At region _) ->
+                Right (PointRegion path region)
+              )
+              & pure
 
             Just (External extCanMod name) ->
               findExternalWith findFirstValueNamed name Src._values extCanMod
@@ -156,8 +157,8 @@ definition root (Watchtower.Editor.PointLocation path point) = do
 
                 Right (Can.TVar name) ->
                   findTVar point name srcMod
-                  & fmap (\(A.At region _) -> Right (PointRegion path region))
-                  & Maybe.fromMaybe (Left "❌ Found TVar type, but not it's location!?")
+                  & maybe (Left "❌ Found TVar type, but not it's location!?")
+                    (\(A.At region _) -> Right (PointRegion path region))
                   & pure
 
                 Right unhandled ->
