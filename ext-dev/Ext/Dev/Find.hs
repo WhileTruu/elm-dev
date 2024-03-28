@@ -136,6 +136,25 @@ definition root (Watchtower.Editor.PointLocation path point) = do
           -- reference for.. references :D
           pure (Right (PointRegion path region))
 
+        FoundImport name -> do
+          details <- Ext.CompileProxy.loadProject root
+          case Ext.Dev.Project.lookupModulePath details name of
+            Nothing ->
+              case Ext.Dev.Project.lookupPkgName details name of
+                Nothing -> pure (Left "Package lookup failed")
+                Just pkgName -> do
+                  maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
+                  case maybeCurrentVersion of
+                    Nothing -> pure (Left "Failed to find package version.")
+                    Just version -> do
+                      packageCache <- Stuff.getPackageCache
+                      let home = Stuff.package packageCache pkgName version
+                      let path = home Path.</> "src" Path.</> ModuleName.toFilePath name Path.<.> "elm"
+                      pure (Right (PointRegion path A.one))
+
+            Just targetPath -> do
+              pure (Right (PointRegion targetPath A.one))
+
         FoundExpr expr patterns -> do
           case getLocatedDetails expr of
             Nothing ->
@@ -244,13 +263,14 @@ data SearchResult
   | FoundPattern Can.Pattern
   | FoundType Src.Type
   | FoundCtor (A.Located Name)
+  | FoundImport Name
   deriving (Show)
 
 findTypeAtPoint :: A.Position -> Src.Module -> SearchResult
 findTypeAtPoint point srcMod =
-  -- TODO: check imports
   -- TODO: check exports
-  findAnnotation point (Src._values srcMod)
+  findImport point (Src._imports srcMod)
+  & orFind (findAnnotation point) (Src._values srcMod)
   & orFind (findUnion point) (Src._unions srcMod)
   & orFind (findUnionTVarAtExactPoint point) (Src._unions srcMod)
   & orFind (findUnionCtorAtExactPoint point) (Src._unions srcMod)
@@ -258,6 +278,14 @@ findTypeAtPoint point srcMod =
   & orFind (findAlias point) (Src._aliases srcMod)
   & orFind (findAliasTVarAtExactPoint point) (Src._aliases srcMod)
   & orFind (findAliasAtExactPoint point) (Src._aliases srcMod)
+
+
+findImport :: A.Position -> [Src.Import] -> SearchResult
+findImport point =
+  findFirstInList $ \(Src.Import (A.At region name) _ _) ->
+    if withinRegion point region
+      then FoundImport name
+      else FoundNothing
 
 
 -- Find union at exact point, nicer than getting an error when trying to
