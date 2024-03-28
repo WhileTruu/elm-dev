@@ -54,6 +54,7 @@ import qualified Ext.Dev.Usage
 import qualified Control.Monad
 import qualified Ext.Dev.Help
 import qualified Ext.Dev.Explain
+import qualified Canonicalize.Expression
 
 {- Find Definition -}
 
@@ -91,26 +92,49 @@ definition root (Watchtower.Editor.PointLocation path point) = do
        pure (Left (show err))
     
     Right srcMod -> do
-      let foundType = findTypeAtPoint point srcMod
+      let
+        found =
+          findTypeAtPoint point srcMod
+          & orFind (maybe FoundNothing (findDeclAtPoint point)) (Can._decls <$> canonical)
 
-      appendFile "/tmp/lsp.log" ("point: " ++ show point ++ "\n  type: " ++ show foundType ++ "\n\n")
-
-      found <-
-        case foundType of
-          FoundNothing -> do
-            case canonical of
-              Just canMod ->
-                  pure $ findDeclAtPoint point (Can._decls canMod)
-
-              Nothing ->
-                  pure foundType
-
-          existing ->
-            pure existing
+      appendFile "/tmp/lsp.log"
+        (
+          "    point: " ++
+          show point ++
+          "\n    type: " ++
+          show found ++
+          "\n\n"
+        )
 
       case found of
         FoundNothing -> do
           pure (Left $ "Found nothing for: " ++ show (Src._name srcMod))
+
+        FoundCtor (A.At region name) ->
+          -- do
+          -- canEnvResult <- Ext.CompileProxy.loadCanonicalizeEnv root path srcMod
+          -- case canEnvResult of
+          --   Nothing ->
+          --     pure (Left ("🚨 No canonical env. Found Ctor: " ++ show (A.At region name)))
+
+          --   Just env -> do
+          --     let
+          --       (_, eitherCanExpr) =
+          --         Canonicalize.Expression.canonicalize env (A.At region (Src.Var Src.CapVar name))
+          --         & (\(Reporting.Result.Result k) ->
+          --             k Map.empty []
+          --               (\freeLocals w e -> (reverse w, Left e))
+          --               (\freeLocals w a -> (reverse w, Right a))
+          --           )
+
+          --     case eitherCanExpr of
+          --       Left err -> pure (Left "FoundType canonicalization error.")
+
+          --       Right expr -> do
+          --         pure (Right (PointRegion path region))
+          -- TODO: Remove code above, canonicalization not needed here, kept as
+          -- reference for.. references :D
+          pure (Right (PointRegion path region))
 
         FoundExpr expr patterns -> do
           case getLocatedDetails expr of
@@ -219,20 +243,21 @@ data SearchResult
   | FoundExpr Can.Expr [Can.Pattern]
   | FoundPattern Can.Pattern
   | FoundType Src.Type
+  | FoundCtor (A.Located Name)
   deriving (Show)
 
 findTypeAtPoint :: A.Position -> Src.Module -> SearchResult
 findTypeAtPoint point srcMod =
   -- TODO: check imports
   -- TODO: check exports
-  -- TODO: check union variants
   findAnnotation point (Src._values srcMod)
   & orFind (findUnion point) (Src._unions srcMod)
-  & orFind (findUnionAtExactPoint point) (Src._unions srcMod)
   & orFind (findUnionTVarAtExactPoint point) (Src._unions srcMod)
+  & orFind (findUnionCtorAtExactPoint point) (Src._unions srcMod)
+  & orFind (findUnionAtExactPoint point) (Src._unions srcMod)
   & orFind (findAlias point) (Src._aliases srcMod)
-  & orFind (findAliasAtExactPoint point) (Src._aliases srcMod)
   & orFind (findAliasTVarAtExactPoint point) (Src._aliases srcMod)
+  & orFind (findAliasAtExactPoint point) (Src._aliases srcMod)
 
 
 -- Find union at exact point, nicer than getting an error when trying to
@@ -245,19 +270,10 @@ findTypeAtPoint point srcMod =
 --
 findUnionAtExactPoint :: A.Position -> [A.Located Src.Union] -> SearchResult
 findUnionAtExactPoint point =
-  findRegion point (\(Src.Union (A.At region name) args variants) ->
-    if withinRegion point region then
-      FoundType
-        (A.At region
-          (Src.TType
-            region
-            name
-            (map (\(A.At varRegion varName) -> A.At varRegion (Src.TVar varName)) args)
-          )
-        )
+  findRegion point (\(Src.Union (A.At region name) args _) ->
+    let tVars = map (\(A.At varRegion varName) -> A.At varRegion (Src.TVar varName)) args in
 
-    else
-      FoundNothing
+    FoundType $ A.At region $ Src.TType region name tVars
   )
 
 -- Find union TVar at exact point, nicer than getting an error when trying to
@@ -270,12 +286,32 @@ findUnionAtExactPoint point =
 --
 findUnionTVarAtExactPoint :: A.Position -> [A.Located Src.Union] -> SearchResult
 findUnionTVarAtExactPoint point =
-  findRegion point (\(Src.Union (A.At region _) vars variants) ->
-    List.find (\(A.At varRegion varName) -> withinRegion point varRegion) vars
-    & maybe FoundNothing (\(A.At varRegion varName) ->
-        FoundType (A.At varRegion (Src.TVar varName))
-      )
-  )
+  findRegion point $ \(Src.Union _ args _) ->
+    findFirstInList (\(A.At region name) ->
+      if withinRegion point region
+      then FoundType (A.At region (Src.TVar name))
+      else FoundNothing
+    ) args
+
+
+-- Find union Ctor at exact point, nicer than getting an error when trying to
+-- go the definition of:
+--
+--     type MyType myTypeVar = MyVariant
+--                             ^^^^^^^^^
+--
+-- Where stuff marked with `^` is region the point is in.
+--
+findUnionCtorAtExactPoint :: A.Position -> [A.Located Src.Union] -> SearchResult
+findUnionCtorAtExactPoint point =
+  findRegion point $ \(Src.Union _ _ ctors) ->
+    findFirstInList
+      (\(A.At region name, types) ->
+        if withinRegion point region
+        then FoundCtor (A.At region name)
+        else FoundNothing
+      ) 
+      ctors
 
 
 -- Find alias at exact point, nicer than getting an error when trying to
@@ -288,20 +324,11 @@ findUnionTVarAtExactPoint point =
 --
 findAliasAtExactPoint :: A.Position -> [A.Located Src.Alias] -> SearchResult
 findAliasAtExactPoint point =
-  findRegion point (\(Src.Alias (A.At region name) args type_) ->
-    if withinRegion point region then
-      FoundType
-        (A.At region
-          (Src.TType
-            region
-            name
-            (map (\(A.At varRegion varName) -> A.At varRegion (Src.TVar varName)) args)
-          )
-        )
+  findRegion point $ \(Src.Alias (A.At region name) args type_) ->
+    let tVars = map (\(A.At varRegion varName) -> A.At varRegion (Src.TVar varName)) args in
 
-    else
-      FoundNothing
-  )
+    FoundType (A.At region (Src.TType region name tVars))
+
 
 -- Find alias TVar at exact point, nicer than getting an error when trying to
 -- go the definition of:
