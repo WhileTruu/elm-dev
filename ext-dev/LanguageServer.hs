@@ -32,7 +32,6 @@ import qualified Ext.Dev.Find
 import qualified Ext.Log
 import qualified GHC.Generics as Generics
 import qualified Json.Encode
-import qualified Reporting.Annotation
 import qualified Reporting.Annotation as Ann
 import qualified Snap.Core hiding (path)
 import qualified Snap.Http.Server
@@ -65,6 +64,7 @@ import qualified Reporting.Doc
 import qualified Text.PrettyPrint.ANSI.Leijen as P
 import qualified Reporting.Warning
 import qualified Ext.FileCache as File
+import qualified Reporting.Error.Syntax
 
 serve :: IO ()
 serve = do
@@ -143,11 +143,11 @@ readHeader = do
 data Request
   = Initialize {reqId :: Int, rootPath :: FilePath}
   | Shutdown {reqId :: Int}
-  | Definition {reqId :: Int, filePath :: FilePath, position :: Reporting.Annotation.Position}
+  | Definition {reqId :: Int, filePath :: FilePath, position :: Ann.Position}
   | References 
     { reqId :: Int
     , filePath :: FilePath
-    , position :: Reporting.Annotation.Position
+    , position :: Ann.Position
     }
   | Exit
   | Initialized
@@ -195,7 +195,7 @@ instance Aeson.FromJSON Request where
         Definition 
           <$> v .: "id"
           <*> pure filePath
-          <*> pure (Reporting.Annotation.Position (row + 1) (col + 1))
+          <*> pure (Ann.Position (row + 1) (col + 1))
 
       "textDocument/references" -> do
         params <- v .: "params"
@@ -211,7 +211,7 @@ instance Aeson.FromJSON Request where
         References
           <$> v .: "id"
           <*> pure filePath
-          <*> pure (Reporting.Annotation.Position (row + 1) (col + 1))
+          <*> pure (Ann.Position (row + 1) (col + 1))
 
       "textDocument/didSave" -> do
         params <- v .: "params"
@@ -292,36 +292,76 @@ handleRequest state@(State mProjects) request =
           ]
         )
 
-    Definition {reqId = reqId, filePath = filePath, position = position} -> do
+    Definition {reqId = reqId, filePath = path , position = position} -> do
       sendCreateWorkDoneProgress "go-to-definition-progress"
-      sendProgressBegin "go-to-definition-progress" "👀 Finding definition"
+      sendProgressBegin "go-to-definition-progress" ("👀 Finding definition: " ++ show position)
 
-      root <- fmap (Maybe.fromMaybe ".") (getRoot filePath state)
-      answer <- Ext.Dev.Find.definition root (Watchtower.Editor.PointLocation filePath position)
+      let location = Watchtower.Editor.PointLocation path position
+      root <- fmap (Maybe.fromMaybe ".") (getRoot path state)
 
-      sendProgressEnd "go-to-definition-progress"
+      result <- Ext.CompileProxy.parse root path
 
-      case answer of
+      pathAndPos <-
+        case result of
+          Right srcModule -> do
+            let localizer = Reporting.Render.Type.Localizer.fromModule srcModule
+            let found = Ext.Dev.Find.definition2 location srcModule
+
+            logWrite $ "Found: " ++ show found
+
+            case found of
+                Nothing ->
+                    pure (Left "Found nothing 😢")
+
+                Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At pos val)) ->
+                    pure (Right ( path, pos ))
+
+                Just (Ext.Dev.Find.FoundUnion (Ann.At pos srcUnion)) ->
+                    pure (Right ( path, pos ))
+
+                Just (Ext.Dev.Find.FoundAlias (Ann.At pos alias_)) ->
+                    pure (Right ( path, pos ))
+
+                Just (Ext.Dev.Find.FoundTVar (Ann.At pos alias_)) ->
+                    pure (Right ( path, pos ))
+
+                _ ->
+                    pure (Left "Found, but unhandled 😢")
+
+          Left _  ->
+              pure (Left "Syntax error 😢")
+
+
+
+      case pathAndPos of
         Left err -> do
+          sendProgressEnd "go-to-definition-progress"
           respondErr reqId err
 
-        Right (Ext.Dev.Find.PointRegion filePath (Ann.Region (Ann.Position sr sc) (Ann.Position er ec))) -> do
-          respond reqId $
-            Aeson.object
-              [ "uri" Aeson..= ("file://" ++ filePath :: String)
-              , "range" Aeson..= Aeson.object
-                [ "start" Aeson..= Aeson.object
-                  [ "line" Aeson..= (sr - 1)
-                  , "character" Aeson..= (sc - 1)
-                  ]
-                , "end" Aeson..= Aeson.object
-                  [ "line" Aeson..= (er - 1)
-                  , "character" Aeson..= (ec - 1)
-                  ]
+        Right (filePath, region@(Ann.Region (Ann.Position sr sc) (Ann.Position er ec))) ->
+          do
+            sendProgressBegin "go-to-definition-progress" ("👀 Found definition: " ++ show region)
+            sendProgressEnd "go-to-definition-progress"
+            respond reqId $
+              Aeson.object
+                [ "uri" Aeson..= ("file://" ++ filePath :: String),
+                  "range"
+                    Aeson..= Aeson.object
+                      [ "start"
+                          Aeson..= Aeson.object
+                            [ "line" Aeson..= (sr - 1),
+                              "character" Aeson..= (sc - 1)
+                            ],
+                        "end"
+                          Aeson..= Aeson.object
+                            [ "line" Aeson..= (er - 1),
+                              "character" Aeson..= (ec - 1)
+                            ]
+                      ]
                 ]
-              ]
 
     References {reqId = reqId, filePath = filePath, position = position } -> do
+
       sendCreateWorkDoneProgress "references-token"
       sendProgressBegin "references-token" "🔍 Finding references"
 
