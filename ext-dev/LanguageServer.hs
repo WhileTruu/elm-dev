@@ -69,6 +69,7 @@ import qualified Stuff
 import qualified System.FilePath as Path
 import qualified Elm.ModuleName as ModuleName
 import qualified Ext.Dev.Package
+import Data.Name (Name)
 
 serve :: IO ()
 serve = do
@@ -316,17 +317,17 @@ handleRequest state@(State mProjects) request =
                 Nothing ->
                     pure (Left "Found nothing 😢")
 
-                Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At pos val)) ->
-                    pure (Right ( path, pos ))
+                Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At region val)) ->
+                    pure (Right ( path, region ))
 
-                Just (Ext.Dev.Find.FoundUnion (Ann.At pos srcUnion)) ->
-                    pure (Right ( path, pos ))
+                Just (Ext.Dev.Find.FoundUnion (Ann.At region srcUnion)) ->
+                    pure (Right ( path, region ))
 
-                Just (Ext.Dev.Find.FoundAlias (Ann.At pos alias_)) ->
-                    pure (Right ( path, pos ))
+                Just (Ext.Dev.Find.FoundAlias (Ann.At region alias_)) ->
+                    pure (Right ( path, region ))
 
-                Just (Ext.Dev.Find.FoundTVar (Ann.At pos alias_)) ->
-                    pure (Right ( path, pos ))
+                Just (Ext.Dev.Find.FoundTVar (Ann.At region alias_)) ->
+                    pure (Right ( path, region ))
 
                 Just (Ext.Dev.Find.FoundExternal modName name) -> do
                     Control.Monad.foldM
@@ -429,6 +430,8 @@ handleRequest state@(State mProjects) request =
 
       sendProgressEnd "compile-progress"
 
+
+findExternal :: FilePath -> Name -> Name -> IO (Either String (FilePath, Ann.Region))
 findExternal root modName name = do
     details <- Ext.CompileProxy.loadProject root
 
@@ -460,14 +463,14 @@ findExternal root modName name = do
                                     case found of
                                         Nothing ->
                                              pure (Left "Could not find named in pkg 😢")
-                                        Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At pos val)) ->
-                                            pure (Right ( path, pos ))
+                                        Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At region val)) ->
+                                            pure (Right ( path, region ))
 
-                                        Just (Ext.Dev.Find.FoundUnion (Ann.At pos srcUnion)) ->
-                                            pure (Right ( path, pos ))
+                                        Just (Ext.Dev.Find.FoundUnion (Ann.At region srcUnion)) ->
+                                            pure (Right ( path, region ))
 
-                                        Just (Ext.Dev.Find.FoundAlias (Ann.At pos alias_)) ->
-                                            pure (Right ( path, pos ))
+                                        Just (Ext.Dev.Find.FoundAlias (Ann.At region alias_)) ->
+                                            pure (Right ( path, region ))
 
                                         _ ->
                                             pure (Left "Found in pkg, but unhandled 😢")
@@ -485,14 +488,14 @@ findExternal root modName name = do
                         Nothing ->
                             pure (Left $ "Could not find named in" ++ path ++ "😢")
 
-                        Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At pos val)) ->
-                            pure (Right ( path, pos ))
+                        Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At region val)) ->
+                            pure (Right ( path, region ))
 
-                        Just (Ext.Dev.Find.FoundUnion (Ann.At pos srcUnion)) ->
-                            pure (Right ( path, pos ))
+                        Just (Ext.Dev.Find.FoundUnion (Ann.At region srcUnion)) ->
+                            pure (Right ( path, region ))
 
-                        Just (Ext.Dev.Find.FoundAlias (Ann.At pos alias_)) ->
-                            pure (Right ( path, pos ))
+                        Just (Ext.Dev.Find.FoundAlias (Ann.At region alias_)) ->
+                            pure (Right ( path, region ))
 
                         a ->
                             pure (Left "Found in external, but unhandled 😢")
