@@ -7,7 +7,7 @@ module LanguageServer (serve) where
 import Control.Applicative ((<|>))
 import qualified Control.Concurrent.STM as STM
 import qualified Control.Exception
-import Control.Monad (guard, when)
+import Control.Monad (guard, when, foldM)
 import Control.Monad.Trans (MonadIO (liftIO))
 import Data.Aeson ((.:))
 import qualified Data.Aeson as Aeson
@@ -90,7 +90,7 @@ serve = do
       case Aeson.eitherDecodeStrict body of
         Left err -> do
           logWrite $ "Error: " ++ err
-          loop state 
+          loop state
 
         Right request -> do
           handleRequest state request
@@ -148,7 +148,7 @@ data Request
   = Initialize {reqId :: Int, rootPath :: FilePath}
   | Shutdown {reqId :: Int}
   | Definition {reqId :: Int, filePath :: FilePath, position :: Ann.Position}
-  | References 
+  | References
     { reqId :: Int
     , filePath :: FilePath
     , position :: Ann.Position
@@ -172,17 +172,17 @@ instance Aeson.FromJSON Request where
   parseJSON = Aeson.withObject "Method" $ \v -> do
     method <- v .: "method" :: AesonTypes.Parser String
     case method of
-      "exit" -> 
+      "exit" ->
         pure Exit
 
-      "initialized" -> 
+      "initialized" ->
         pure Initialized
 
       "initialize" -> do
         params <- v .: "params"
         Initialize <$> v .: "id" <*> params .: "rootPath"
 
-      "shutdown" -> 
+      "shutdown" ->
         Shutdown <$> v .: "id"
 
       "textDocument/definition" -> do
@@ -193,10 +193,10 @@ instance Aeson.FromJSON Request where
         let filePath = drop 7 uri
 
         position <- params .: "position"
-        let row = fromIntegral $ line position 
-        let col = fromIntegral $ character position 
+        let row = fromIntegral $ line position
+        let col = fromIntegral $ character position
 
-        Definition 
+        Definition
           <$> v .: "id"
           <*> pure filePath
           <*> pure (Ann.Position (row + 1) (col + 1))
@@ -209,8 +209,8 @@ instance Aeson.FromJSON Request where
         let filePath = drop 7 uri
 
         position <- params .: "position"
-        let row = fromIntegral $ line position 
-        let col = fromIntegral $ character position 
+        let row = fromIntegral $ line position
+        let col = fromIntegral $ character position
 
         References
           <$> v .: "id"
@@ -246,11 +246,11 @@ handleRequest state@(State mProjects) request =
         Aeson.object
           [ "capabilities" Aeson..= Aeson.object
             [ "definitionProvider" Aeson..= Aeson.object []
-            , "textDocumentSync" Aeson..= Aeson.object 
+            , "textDocumentSync" Aeson..= Aeson.object
                 [ "save" Aeson..= True
                 , "openClose" Aeson..= True
                 ]
-            , "referencesProvider" Aeson..= Aeson.object 
+            , "referencesProvider" Aeson..= Aeson.object
               [ "workDoneProgress" Aeson..= True
               ]
             ]
@@ -313,7 +313,6 @@ handleRequest state@(State mProjects) request =
             logWrite $ "Found: " ++ show found
 
             case found of
-
                 Nothing ->
                     pure (Left "Found nothing 😢")
 
@@ -330,70 +329,20 @@ handleRequest state@(State mProjects) request =
                     pure (Right ( path, pos ))
 
                 Just (Ext.Dev.Find.FoundExternal modName name) -> do
-                    details <- Ext.CompileProxy.loadProject root 
+                    Control.Monad.foldM
+                      (\acc mod ->
+                        case acc of
+                            Left _ ->
+                                findExternal root mod name
 
-                    case Ext.Dev.Project.lookupModulePath details modName of
-                        Nothing -> do
-                            case Ext.Dev.Project.lookupPkgName details modName of
-                                Nothing ->
-                                    pure (Left "Could not find package 😢")
+                            found ->
+                                pure found
+                      )
+                      (Left "Did not find in any import 😢")
+                      (fst modName : snd modName)
 
-                                Just pkgName -> do
-                                    maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
-
-                                    case maybeCurrentVersion of
-                                        Nothing ->
-                                            pure (Left "Could not find package 😢")
-                                        Just version -> do
-                                            packageCache <- Stuff.getPackageCache
-                                            let home = Stuff.package packageCache pkgName version
-                                            let path = home Path.</> "src" Path.</> ModuleName.toFilePath modName Path.<.>"elm"
-                                            loadedFile <- Ext.CompileProxy.loadPkgFileSource pkgName home path
-
-                                            case loadedFile of
-                                                Left err ->
-                                                    pure (Left "Could not find module 😢")
-
-                                                Right (_, source) ->
-                                                    let found = Ext.Dev.Find.definitionNamed name source in
-
-                                                    case found of
-                                                        Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At pos val)) ->
-                                                            pure (Right ( path, pos ))
-
-                                                        Just (Ext.Dev.Find.FoundUnion (Ann.At pos srcUnion)) ->
-                                                            pure (Right ( path, pos ))
-
-                                                        Just (Ext.Dev.Find.FoundAlias (Ann.At pos alias_)) ->
-                                                            pure (Right ( path, pos ))
-
-                                                        _ ->
-                                                            pure (Left "Found in pkg, but unhandled 😢")
-
-                        Just path -> do
-                            loadedFile <- Ext.CompileProxy.parse root path
-
-                            case loadedFile of
-                                Left err ->
-                                    pure (Left "Could not find module 😢")
-
-                                Right source ->
-                                    let found = Ext.Dev.Find.definitionNamed name source in
-                                    case found of
-                                        Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At pos val)) ->
-                                            pure (Right ( path, pos ))
-
-                                        Just (Ext.Dev.Find.FoundUnion (Ann.At pos srcUnion)) ->
-                                            pure (Right ( path, pos ))
-
-                                        Just (Ext.Dev.Find.FoundAlias (Ann.At pos alias_)) ->
-                                            pure (Right ( path, pos ))
-
-                                        _ ->
-                                            pure (Left "Found in external, but unhandled 😢")
-
-                _ ->
-                    pure (Left "Found, but unhandled 😢")
+                Just _ ->
+                      (pure (Left "Found, but unhandled 😢"))
 
           Left _  ->
               pure (Left "Syntax error 😢")
@@ -444,7 +393,7 @@ handleRequest state@(State mProjects) request =
         Right pointRegions ->
           respond reqId
             (pointRegions
-              & map 
+              & map
                 (\(Ext.Dev.Find.PointRegion filePath (Ann.Region (Ann.Position sr sc) (Ann.Position er ec))) ->
                   Aeson.object
                     [ "uri" Aeson..= ("file://" ++ filePath :: String)
@@ -459,10 +408,10 @@ handleRequest state@(State mProjects) request =
                         ]
                       ]
                     ]
-                ) 
+                )
               & Aeson.toJSON
             )
-            
+
 
     DidSave {filePath = filePath} -> do
       sendCreateWorkDoneProgress "compile-progress"
@@ -479,6 +428,75 @@ handleRequest state@(State mProjects) request =
       recompile state [filePath]
 
       sendProgressEnd "compile-progress"
+
+findExternal root modName name = do
+    details <- Ext.CompileProxy.loadProject root
+
+    case Ext.Dev.Project.lookupModulePath details modName of
+        Nothing -> do
+            case Ext.Dev.Project.lookupPkgName details modName of
+                Nothing ->
+                    pure (Left "Could not find package 😢")
+
+                Just pkgName -> do
+                    maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
+
+                    case maybeCurrentVersion of
+                        Nothing ->
+                            pure (Left "Could not find package 😢")
+                        Just version -> do
+                            packageCache <- Stuff.getPackageCache
+                            let home = Stuff.package packageCache pkgName version
+                            let path = home Path.</> "src" Path.</> ModuleName.toFilePath modName Path.<.>"elm"
+                            loadedFile <- Ext.CompileProxy.loadPkgFileSource pkgName home path
+
+                            case loadedFile of
+                                Left err ->
+                                    pure (Left "Could not find module 😢")
+
+                                Right (_, source) ->
+                                    let found = Ext.Dev.Find.definitionNamed name source in
+
+                                    case found of
+                                        Nothing ->
+                                             pure (Left "Could not find named in pkg 😢")
+                                        Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At pos val)) ->
+                                            pure (Right ( path, pos ))
+
+                                        Just (Ext.Dev.Find.FoundUnion (Ann.At pos srcUnion)) ->
+                                            pure (Right ( path, pos ))
+
+                                        Just (Ext.Dev.Find.FoundAlias (Ann.At pos alias_)) ->
+                                            pure (Right ( path, pos ))
+
+                                        _ ->
+                                            pure (Left "Found in pkg, but unhandled 😢")
+
+        Just path -> do
+            loadedFile <- Ext.CompileProxy.parse root path
+
+            case loadedFile of
+                Left err ->
+                    pure (Left "Could not find module 😢")
+
+                Right source ->
+                    let found = Ext.Dev.Find.definitionNamed name source in
+                    case found of
+                        Nothing ->
+                            pure (Left $ "Could not find named in" ++ path ++ "😢")
+
+                        Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At pos val)) ->
+                            pure (Right ( path, pos ))
+
+                        Just (Ext.Dev.Find.FoundUnion (Ann.At pos srcUnion)) ->
+                            pure (Right ( path, pos ))
+
+                        Just (Ext.Dev.Find.FoundAlias (Ann.At pos alias_)) ->
+                            pure (Right ( path, pos ))
+
+                        a ->
+                            pure (Left "Found in external, but unhandled 😢")
+
 
 
 sendCreateWorkDoneProgress :: String -> IO ()
@@ -699,9 +717,9 @@ recompileFile ( top, remain, projCache@(Client.ProjectCache proj@(Ext.Dev.Projec
 
 respond :: Int -> Aeson.Value -> IO ()
 respond idValue value =
-  let 
+  let
     header = "Content-Length: " ++ show (B.length content) ++ "\r\n\r\n"
-    content = LB.toStrict $ Aeson.encode $ Aeson.object 
+    content = LB.toStrict $ Aeson.encode $ Aeson.object
       [ "id" Aeson..= idValue
       , "result" Aeson..= value
       ]
@@ -727,7 +745,7 @@ sendNotification method value =
 
 respondErr :: Int -> String -> IO ()
 respondErr idValue message =
-  let 
+  let
     header = "Content-Length: " ++ show (B.length content) ++ "\r\n\r\n"
     content = LB.toStrict $ Aeson.encode $ Aeson.object
       [ "id" Aeson..= idValue

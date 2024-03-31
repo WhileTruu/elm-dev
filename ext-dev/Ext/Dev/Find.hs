@@ -94,15 +94,18 @@ definition root (Watchtower.Editor.PointLocation path point) = do
 
 data Found
     = FoundType Src.Type
+    | FoundExpr Src.Expr
     | FoundValue (A.Located Src.Value)
     | FoundUnion (A.Located Src.Union)
     | FoundAlias (A.Located Src.Alias)
     | FoundTVar (A.Located Name)
-    | FoundExternal Name Name
+    -- FoundExternal includeds a list of potential module names as
+    -- we do not know from which module the definition is from
+    | FoundExternal (Name, [Name]) Name
     deriving (Show)
 
 
-find :: (A.Located a -> Maybe found) -> [ A.Located a ] -> Maybe found
+find :: (a -> Maybe found) -> [ a ] -> Maybe found
 find toResult =
     -- TODO: stop search after finding?
     List.foldl
@@ -150,6 +153,7 @@ definition2 point srcMod@(Src.Module name exports docs imports values unions ali
     find (findAnnotation point (typeToFound srcMod)) values
         & orFind (findAlias point (typeToFound srcMod)) aliases
         & orFind (findUnion point (typeToFound srcMod)) unions
+        & orFind (findValue point (exprToFound srcMod)) values
         & orFind (atLocation point FoundValue) values
         & orFind (atLocation point FoundUnion) unions
         & orFind (atLocation point FoundAlias) aliases
@@ -247,8 +251,8 @@ typeToFound srcMod@(Src.Module _ _ _ imports values unions aliases _ _) tipe@(A.
             -- TODO: To simplify refrerence finding, should TVar specify what
             -- it's a TVar for (Alias, Union, etc)?
             find findAliasTVar aliases
-            <|> find findUnionTVar unions
-            & Maybe.fromMaybe (FoundTVar (A.At (A.toRegion tipe) name))
+                <|> find findUnionTVar unions
+                & Maybe.fromMaybe (FoundTVar (A.At (A.toRegion tipe) name))
 
             where
 
@@ -280,43 +284,13 @@ typeToFound srcMod@(Src.Module _ _ _ imports values unions aliases _ _) tipe@(A.
 
         Src.TType _ name _ ->
             definitionNamed name srcMod
-            <|>
-                (imports
-                    & List.find (\(Src.Import (A.At _ importName) alias exposing) ->
-                        case exposing of
-                            Src.Open ->
-                                False
-
-                            Src.Explicit exposed ->
-                                List.any
-                                    (\a ->
-                                        case a of
-                                            Src.Upper (A.At _ uname) privacy ->
-                                                name == uname
-
-                                            _ ->
-                                                False
-                                   )
-                                   exposed
-                    )
-                    & fmap
-                        (\(Src.Import (A.At _ importName) _ _) ->
-                            FoundExternal importName name
-                        )
-                )
-            & Maybe.fromMaybe (FoundType tipe)
-
-        Src.TTypeQual _ qual name _ ->
-            imports
-                & List.find
-                    (\(Src.Import (A.At _ importName) alias _) ->
-                        importName == qual || alias == Just qual
-                    )
-                & fmap
-                    (\(Src.Import (A.At _ importName) _ _) ->
-                       FoundExternal importName name
+                <|> (findPotentialModulesWhereNameIsImportedFrom name imports
+                        & fmap (\potential -> FoundExternal potential name)
                     )
                 & Maybe.fromMaybe (FoundType tipe)
+
+        Src.TTypeQual _ qual name _ ->
+            varQualToFound imports qual name & Maybe.fromMaybe (FoundType tipe)
 
         Src.TRecord _ _ ->
             FoundType tipe
@@ -357,6 +331,232 @@ toAliasName :: Src.Alias -> Name
 toAliasName (Src.Alias (A.At _ name) _ _) =
     name
 
+
+findValue
+    :: Watchtower.Editor.PointLocation
+    -> (Src.Expr -> Found)
+    -> A.Located Src.Value
+    -> Maybe Found
+findValue (Watchtower.Editor.PointLocation _ point) toResult (A.At region (Src.Value _ patterns expr typeAnn)) =
+    if withinRegion point region then
+        findExpr point patterns expr & fmap toResult
+
+    else
+        Nothing
+
+
+findExpr :: A.Position -> [Src.Pattern] -> Src.Expr -> Maybe Src.Expr
+findExpr point foundPatterns expr@(A.At region _) =
+    if withinRegion point region then
+        case refineExprMatch point foundPatterns expr of
+            Nothing ->
+                Just expr
+
+            refined ->
+                refined
+
+    else
+        Nothing
+
+
+refineExprMatch :: A.Position -> [Src.Pattern] -> Src.Expr -> Maybe Src.Expr
+refineExprMatch point foundPatterns (A.At _ expr_) =
+    case expr_ of
+        Src.List exprs ->
+            find dive exprs
+
+        Src.Negate expr ->
+            dive expr
+
+        Src.Binops exprsAndNames expr ->
+            find dive (map fst exprsAndNames)
+                <|> dive expr
+
+        Src.Lambda patterns expr ->
+            -- find (findPattern point) patterns <|>
+            extendAndDive patterns expr
+
+        Src.Call expr exprs ->
+            find dive exprs
+                <|> dive expr
+
+        Src.If listTupleExprs expr ->
+            find
+                (\(one, two) ->
+                    dive one
+                        <|> dive two
+                )
+                listTupleExprs
+                <|> dive expr
+
+        Src.Let def expr ->
+            Nothing
+
+            -- FIXME: find defs and stuff
+            -- findDef point foundPatterns def
+            --    & orFind (extendAndDive [defNamePattern def]) expr
+
+        _ ->
+            Nothing
+
+        -- FIXME: find other kinds of exprs too
+        -- Can.LetRec defs expr ->
+        --     findFirstInList (findDef point foundPatterns) defs
+        --         & orFind (extendAndDive (map defNamePattern defs)) expr
+
+        -- Can.LetDestruct pattern one two ->
+        --     findPattern point pattern
+        --         & orFind dive one
+        --         & orFind (extendAndDive [pattern]) two
+
+        -- Can.Case expr branches ->
+        --     dive expr
+        --         & orFind
+        --             (findFirstInList $
+        --                 \(Can.CaseBranch pattern expr) ->
+        --                     findPattern point pattern
+        --                         & orFind (extendAndDive [pattern]) expr
+        --             )
+        --             branches
+
+        -- Can.Access expr locatedName ->
+        --     dive expr
+
+        -- Can.Update name expr fields ->
+        --     fields
+        --         & Map.toAscList
+        --         & findFirstInList
+        --             (\(fieldName, Can.FieldUpdate region fieldExpr) -> dive fieldExpr)
+        --         & orFind dive expr
+
+        -- Can.Record fields ->
+        --     fields
+        --         & Map.toAscList
+        --         & findFirstInList (\(fieldName, fieldExpr) -> dive fieldExpr)
+
+        -- Can.Tuple one two maybeThree ->
+        --     dive one
+        --         & orFind dive two
+        --         & orFind (maybe FoundNothing dive) maybeThree
+
+        -- _ ->
+        --     FoundNothing
+
+    where
+        dive = findExpr point foundPatterns
+
+        extendAndDive newPatterns = findExpr point (newPatterns ++ foundPatterns)
+
+
+findPattern :: A.Position -> Src.Pattern -> Maybe Src.Pattern
+findPattern point pattern@(A.At region _) =
+    if withinRegion point region then
+        case refinePatternMatch point pattern of
+            Nothing ->
+                Just pattern
+
+            refined ->
+                refined
+
+    else
+        Nothing
+
+
+refinePatternMatch :: A.Position -> Src.Pattern -> Maybe Src.Pattern
+refinePatternMatch point (A.At _ pattern_) =
+    -- FIXME: refine pattern matches
+    Nothing
+
+exprToFound :: Src.Module -> Src.Expr -> Found
+exprToFound srcMod@(Src.Module _ _ _ imports values unions aliases infixes effects) expr@(A.At _ expr_) =
+    case expr_ of
+        Src.Chr _ -> FoundExpr expr
+        Src.Str _ -> FoundExpr expr
+        Src.Int _ -> FoundExpr expr
+        Src.Float _ -> FoundExpr expr
+        Src.Var _ name -> varToFound srcMod name & Maybe.fromMaybe (FoundExpr expr)
+        Src.VarQual varType mod name -> varQualToFound imports mod name & Maybe.fromMaybe (FoundExpr expr)
+        Src.List _ -> FoundExpr expr
+        Src.Op _ -> FoundExpr expr
+        Src.Negate _ -> FoundExpr expr
+        Src.Binops _ _ -> FoundExpr expr
+        Src.Lambda _ _ -> FoundExpr expr
+        Src.Call _ _ -> FoundExpr expr
+        Src.If _ _ -> FoundExpr expr
+        Src.Let _ _ -> FoundExpr expr
+        Src.Case _ _ -> FoundExpr expr
+        Src.Accessor _ -> FoundExpr expr
+        Src.Access _ _ -> FoundExpr expr
+        Src.Update _ _ -> FoundExpr expr
+        Src.Record _ -> FoundExpr expr
+        Src.Unit  -> FoundExpr expr
+        Src.Tuple _ _ _ -> FoundExpr expr
+        Src.Shader _ _ -> FoundExpr expr
+
+
+varToFound :: Src.Module -> Name -> Maybe Found
+varToFound srcMod@(Src.Module _ _ _ imports _ _ _ _ _) name =
+    definitionNamed name srcMod
+        <|> (findPotentialModulesWhereNameIsImportedFrom name imports
+                & fmap (\potential -> FoundExternal potential name)
+            )
+
+
+varQualToFound :: [Src.Import] -> Name -> Name -> Maybe Found
+varQualToFound imports mod name =
+    imports
+        & List.filter
+            (\(Src.Import (A.At _ importName) alias _) ->
+                importName == mod || alias == Just mod
+            )
+        & map
+            (\(Src.Import (A.At _ importName) _ _) ->
+                importName
+            )
+        & (\a ->
+                case a of
+                    mod : mods ->
+                        Just (FoundExternal (mod, mods) name)
+
+                    [] ->
+                        Nothing
+           )
+
+
+findPotentialModulesWhereNameIsImportedFrom :: Name -> [Src.Import] -> Maybe (Name, [Name])
+findPotentialModulesWhereNameIsImportedFrom name =
+    (\a ->
+        case a of
+            mod : mods ->
+                Just (mod, mods)
+
+            [] ->
+                Nothing
+    )
+    . map
+        (\(Src.Import (A.At _ importName) _ _) ->
+            importName
+        )
+    . List.filter
+        (\(Src.Import (A.At _ importName) alias exposing) ->
+            case exposing of
+                Src.Open ->
+                    -- FIXME: should be True, if it exposes everything,
+                    -- the name is potentially from there
+                    False
+
+                Src.Explicit exposed ->
+                    List.any
+                        (\a ->
+                            case a of
+                                Src.Upper (A.At _ uname) privacy ->
+                                    name == uname
+
+                                _ ->
+                                    False
+                       )
+                       exposed
+        )
 
 
 {-| References -}
