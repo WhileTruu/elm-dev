@@ -65,6 +65,10 @@ import qualified Text.PrettyPrint.ANSI.Leijen as P
 import qualified Reporting.Warning
 import qualified Ext.FileCache as File
 import qualified Reporting.Error.Syntax
+import qualified Stuff
+import qualified System.FilePath as Path
+import qualified Elm.ModuleName as ModuleName
+import qualified Ext.Dev.Package
 
 serve :: IO ()
 serve = do
@@ -304,12 +308,12 @@ handleRequest state@(State mProjects) request =
       pathAndPos <-
         case result of
           Right srcModule -> do
-            let localizer = Reporting.Render.Type.Localizer.fromModule srcModule
             let found = Ext.Dev.Find.definition2 location srcModule
 
             logWrite $ "Found: " ++ show found
 
             case found of
+
                 Nothing ->
                     pure (Left "Found nothing 😢")
 
@@ -324,6 +328,69 @@ handleRequest state@(State mProjects) request =
 
                 Just (Ext.Dev.Find.FoundTVar (Ann.At pos alias_)) ->
                     pure (Right ( path, pos ))
+
+                Just (Ext.Dev.Find.FoundExternal modName name) -> do
+                    details <- Ext.CompileProxy.loadProject root 
+
+                    case Ext.Dev.Project.lookupModulePath details modName of
+                        Nothing -> do
+                            case Ext.Dev.Project.lookupPkgName details modName of
+                                Nothing ->
+                                    pure (Left "Could not find package 😢")
+
+                                Just pkgName -> do
+                                    maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
+
+                                    case maybeCurrentVersion of
+                                        Nothing ->
+                                            pure (Left "Could not find package 😢")
+                                        Just version -> do
+                                            packageCache <- Stuff.getPackageCache
+                                            let home = Stuff.package packageCache pkgName version
+                                            let path = home Path.</> "src" Path.</> ModuleName.toFilePath modName Path.<.>"elm"
+                                            loadedFile <- Ext.CompileProxy.loadPkgFileSource pkgName home path
+
+                                            case loadedFile of
+                                                Left err ->
+                                                    pure (Left "Could not find module 😢")
+
+                                                Right (_, source) ->
+                                                    let found = Ext.Dev.Find.definitionNamed name source in
+
+                                                    case found of
+                                                        Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At pos val)) ->
+                                                            pure (Right ( path, pos ))
+
+                                                        Just (Ext.Dev.Find.FoundUnion (Ann.At pos srcUnion)) ->
+                                                            pure (Right ( path, pos ))
+
+                                                        Just (Ext.Dev.Find.FoundAlias (Ann.At pos alias_)) ->
+                                                            pure (Right ( path, pos ))
+
+                                                        _ ->
+                                                            pure (Left "Found in pkg, but unhandled 😢")
+
+                        Just path -> do
+                            loadedFile <- Ext.CompileProxy.parse root path
+
+                            case loadedFile of
+                                Left err ->
+                                    pure (Left "Could not find module 😢")
+
+                                Right source ->
+                                    let found = Ext.Dev.Find.definitionNamed name source in
+                                    case found of
+                                        Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At pos val)) ->
+                                            pure (Right ( path, pos ))
+
+                                        Just (Ext.Dev.Find.FoundUnion (Ann.At pos srcUnion)) ->
+                                            pure (Right ( path, pos ))
+
+                                        Just (Ext.Dev.Find.FoundAlias (Ann.At pos alias_)) ->
+                                            pure (Right ( path, pos ))
+
+                                        _ ->
+                                            pure (Left "Found in external, but unhandled 😢")
 
                 _ ->
                     pure (Left "Found, but unhandled 😢")

@@ -3,11 +3,12 @@
 module Ext.Dev.Find
   ( definition
   , definition2
+  , definitionNamed
   , references
   , encodeResult
   , PointRegion (..)
   , Found (..)
-  ) 
+  )
 where
 
 import AST.Canonical (Type (..))
@@ -97,13 +98,14 @@ data Found
     | FoundUnion (A.Located Src.Union)
     | FoundAlias (A.Located Src.Alias)
     | FoundTVar (A.Located Name)
+    | FoundExternal Name Name
     deriving (Show)
 
 
 find :: (A.Located a -> Maybe found) -> [ A.Located a ] -> Maybe found
 find toResult =
     -- TODO: stop search after finding?
-    List.foldl 
+    List.foldl
         (\found located ->
             case found of
                 Nothing ->
@@ -112,7 +114,7 @@ find toResult =
                 Just _ ->
                     found
         )
-        Nothing 
+        Nothing
 
 
 -- Helpers
@@ -153,7 +155,7 @@ definition2 point srcMod@(Src.Module name exports docs imports values unions ali
         & orFind (atLocation point FoundAlias) aliases
 
 
-findAnnotation 
+findAnnotation
     :: Watchtower.Editor.PointLocation
     -> (Src.Type -> Found)
     -> A.Located Src.Value
@@ -166,12 +168,12 @@ findAnnotation (Watchtower.Editor.PointLocation _ point) toResult (A.At region (
         Nothing
 
 
-findAlias 
-    :: Watchtower.Editor.PointLocation 
-    -> (Src.Type -> Found) 
-    -> A.Located Src.Alias 
+findAlias
+    :: Watchtower.Editor.PointLocation
+    -> (Src.Type -> Found)
+    -> A.Located Src.Alias
     -> Maybe Found
-findAlias (Watchtower.Editor.PointLocation _ point) toResult locatedItem@(A.At region (Src.Alias _ _ type_)) = 
+findAlias (Watchtower.Editor.PointLocation _ point) toResult locatedItem@(A.At region (Src.Alias _ _ type_)) =
     if withinRegion point region then
         findType point type_
         & fmap toResult
@@ -180,10 +182,10 @@ findAlias (Watchtower.Editor.PointLocation _ point) toResult locatedItem@(A.At r
         Nothing
 
 
-findUnion 
-    :: Watchtower.Editor.PointLocation 
-    -> (Src.Type -> Found) 
-    -> A.Located Src.Union 
+findUnion
+    :: Watchtower.Editor.PointLocation
+    -> (Src.Type -> Found)
+    -> A.Located Src.Union
     -> Maybe Found
 findUnion (Watchtower.Editor.PointLocation _ point) toResult (A.At region (Src.Union _ _ ctors))=
     if withinRegion point region then
@@ -209,7 +211,7 @@ findType point tipe@(A.At region type_) =
 refineTypeMatch :: A.Position -> Src.Type -> Maybe Src.Type
 refineTypeMatch point tipe@(A.At region type_) =
     case type_ of
-        Src.TLambda arg ret -> 
+        Src.TLambda arg ret ->
             dive arg & orFind dive [ret]
 
         Src.TVar _ ->
@@ -232,17 +234,17 @@ refineTypeMatch point tipe@(A.At region type_) =
             find dive (a : b : rest)
 
     where
-        dive = findType point 
+        dive = findType point
 
 
 typeToFound :: Src.Module -> Src.Type -> Found
-typeToFound srcMod@(Src.Module _ _ _ _ values unions aliases _ _) tipe@(A.At (A.Region point _) type_) =
+typeToFound srcMod@(Src.Module _ _ _ imports values unions aliases _ _) tipe@(A.At (A.Region point _) type_) =
     case type_ of
         Src.TLambda _ _ ->
             FoundType tipe
 
         Src.TVar name ->
-            -- TODO: To simplify refrerence finding, should TVar specify what 
+            -- TODO: To simplify refrerence finding, should TVar specify what
             -- it's a TVar for (Alias, Union, etc)?
             find findAliasTVar aliases
             <|> find findUnionTVar unions
@@ -253,7 +255,7 @@ typeToFound srcMod@(Src.Module _ _ _ _ values unions aliases _ _) tipe@(A.At (A.
               findAliasTVar (A.At region (Src.Alias (A.At _ _) args _)) =
                   if withinRegion point region then
                       find
-                          (\tVar@(A.At _ varName) -> 
+                          (\tVar@(A.At _ varName) ->
                               if withinRegion point region && name == varName then
                                   Just (FoundTVar tVar)
                               else
@@ -266,7 +268,7 @@ typeToFound srcMod@(Src.Module _ _ _ _ values unions aliases _ _) tipe@(A.At (A.
               findUnionTVar (A.At region (Src.Union (A.At _ _) args _)) =
                   if withinRegion point region then
                       find
-                          (\tVar@(A.At _ varName) -> 
+                          (\tVar@(A.At _ varName) ->
                               if withinRegion point region && name == varName then
                                   Just (FoundTVar tVar)
                               else
@@ -277,19 +279,52 @@ typeToFound srcMod@(Src.Module _ _ _ _ values unions aliases _ _) tipe@(A.At (A.
                     Nothing
 
         Src.TType _ name _ ->
-            definitionNamed name srcMod 
+            definitionNamed name srcMod
+            <|>
+                (imports
+                    & List.find (\(Src.Import (A.At _ importName) alias exposing) ->
+                        case exposing of
+                            Src.Open ->
+                                False
+
+                            Src.Explicit exposed ->
+                                List.any
+                                    (\a ->
+                                        case a of
+                                            Src.Upper (A.At _ uname) privacy ->
+                                                name == uname
+
+                                            _ ->
+                                                False
+                                   )
+                                   exposed
+                    )
+                    & fmap
+                        (\(Src.Import (A.At _ importName) _ _) ->
+                            FoundExternal importName name
+                        )
+                )
             & Maybe.fromMaybe (FoundType tipe)
 
-        Src.TTypeQual _ _ _ _ -> 
+        Src.TTypeQual _ qual name _ ->
+            imports
+                & List.find
+                    (\(Src.Import (A.At _ importName) alias _) ->
+                        importName == qual || alias == Just qual
+                    )
+                & fmap
+                    (\(Src.Import (A.At _ importName) _ _) ->
+                       FoundExternal importName name
+                    )
+                & Maybe.fromMaybe (FoundType tipe)
+
+        Src.TRecord _ _ ->
             FoundType tipe
 
-        Src.TRecord _ _ -> 
+        Src.TUnit ->
             FoundType tipe
 
-        Src.TUnit -> 
-            FoundType tipe
-
-        Src.TTuple _ _ _ -> 
+        Src.TTuple _ _ _ ->
             FoundType tipe
 
 
