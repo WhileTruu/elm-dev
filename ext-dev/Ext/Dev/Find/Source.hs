@@ -1,9 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Ext.Dev.Find.Source
-  ( definitionNamed 
+  ( definitionNamed
   , definitionAtPoint, Found(..)
   , withCanonical, Def(..)
+  , typeAtPoint, FoundType(..)
+  , potentialImportSourcesForName
+  , importsForQual
+  , varAtPoint, FoundVar(..)
   )
 where
 
@@ -17,6 +21,7 @@ import qualified Data.List as List
 import Data.Name (Name)
 import qualified Data.Map as Map
 import Data.Function ((&))
+import GHC.Base ((<|>))
 
 data Found
     = FoundValue (Maybe Def) (A.Located Src.Value)
@@ -38,7 +43,7 @@ withCanonical (Can.Module name exports docs decls unions aliases binops effects)
 
         FoundUnion _ (union@(A.At loc (Src.Union (A.At _ name) _ _))) ->
             FoundUnion (Map.lookup name unions) union
-        
+
         FoundAlias _ (A.At loc alias_) ->
             FoundAlias (Map.lookup (toAliasName alias_) aliases) (A.At loc alias_)
 
@@ -67,7 +72,7 @@ defNamed name def =
     case def of
         Can.Def (A.At _ defName) _ _ ->
             name == defName
-        
+
         Can.TypedDef (A.At _ defName) _ _ _ _ ->
             name == defName
 
@@ -114,20 +119,20 @@ atLocation (Watchtower.Editor.PointLocation _ point) toFound (locatedItem@(A.At 
     else
         Nothing
 
-find :: (A.Located a -> Maybe Found) -> [ A.Located a ] -> Maybe Found
+find :: (a -> Maybe found) -> [ a ] -> Maybe found
 find toResult items =
-    List.foldl 
+    List.foldl
         (\found located ->
             case found of
                 Nothing ->
                     (toResult located)
-                    
+
                 Just _ ->
                     found
-        
+
         ) Nothing items
 
-orFind :: (A.Located a -> Maybe Found) -> [ A.Located a] -> Maybe Found -> Maybe Found
+orFind :: (a -> Maybe found) -> [ a ] -> Maybe found -> Maybe found
 orFind toResult items previousResult =
     case previousResult of
         Nothing ->
@@ -139,9 +144,292 @@ orFind toResult items previousResult =
 
 withinRegion :: A.Position -> A.Region -> Bool
 withinRegion (A.Position row col) (A.Region (A.Position startRow startCol) (A.Position endRow endCol)) =
-  (row == startRow && col >= startCol || row > startRow) 
+  (row == startRow && col >= startCol || row > startRow)
         && (row == endRow && col <= endCol || row < endRow)
 
+
+data FoundType
+    = FoundTVar (A.Located Name)
+    | FoundTType A.Region Name
+    | FoundTTypeQual A.Region Name Name
+    deriving (Show)
+
+
+typeAtPoint :: Watchtower.Editor.PointLocation -> Src.Module -> Maybe FoundType
+typeAtPoint point srcMod@(Src.Module name exports docs imports values unions aliases infixes effects) =
+    find (\a -> typeAtPointInValue point a >>= foundFromType srcMod) values
+        & orFind (\a -> typeAtPointInAlias point a >>= foundFromType srcMod) aliases
+        & orFind (\a -> typeAtPointInUnion point a >>= foundFromType srcMod) unions
+
+
+foundFromType :: Src.Module -> Src.Type -> Maybe FoundType
+foundFromType srcMod@(Src.Module _ _ _ imports values unions aliases _ _) tipe@(A.At region type_) =
+    case type_ of
+        Src.TLambda _ _ ->             Nothing
+        Src.TVar name ->               Just (FoundTVar (A.At region name))
+        Src.TType _ name _ ->          Just (FoundTType region name)
+        Src.TTypeQual _ qual name _ -> Just (FoundTTypeQual region qual name)
+        Src.TRecord _ _ ->             Nothing
+        Src.TUnit ->                   Nothing
+        Src.TTuple _ _ _ ->            Nothing
+
+
+typeAtPointInValue :: Watchtower.Editor.PointLocation -> A.Located Src.Value -> Maybe Src.Type
+typeAtPointInValue (Watchtower.Editor.PointLocation _ point) (A.At region (Src.Value _ _ _ typeAnn)) =
+    if withinRegion point region then
+        typeAnn >>= findType point
+
+    else
+        Nothing
+
+
+typeAtPointInAlias :: Watchtower.Editor.PointLocation -> A.Located Src.Alias -> Maybe Src.Type
+typeAtPointInAlias (Watchtower.Editor.PointLocation _ point) locatedItem@(A.At region (Src.Alias _ _ type_)) =
+    if withinRegion point region then
+        findType point type_
+
+    else
+        Nothing
+
+
+typeAtPointInUnion :: Watchtower.Editor.PointLocation -> A.Located Src.Union -> Maybe Src.Type
+typeAtPointInUnion (Watchtower.Editor.PointLocation _ point) (A.At region (Src.Union _ _ ctors))=
+    if withinRegion point region then
+        find (findType point) (concatMap snd ctors)
+
+    else
+        Nothing
+
+
+findType :: A.Position -> Src.Type -> Maybe Src.Type
+findType point tipe@(A.At region type_) =
+    if withinRegion point region then
+        case refineTypeMatch point tipe of
+            Nothing -> Just tipe
+            refined -> refined
+    else
+        Nothing
+
+
+refineTypeMatch :: A.Position -> Src.Type -> Maybe Src.Type
+refineTypeMatch point tipe@(A.At region type_) =
+    case type_ of
+        Src.TLambda arg ret ->          dive arg & orFind dive [ret]
+        Src.TVar _ ->                   Nothing
+        Src.TType _ _ tvars ->          find dive tvars
+        Src.TTypeQual _ _ _ tvars ->    find dive tvars
+        Src.TRecord fields extRecord -> find dive (map snd fields) -- TODO: Check extRecord
+        Src.TUnit ->                    Nothing
+        Src.TTuple a b rest ->          find dive (a : b : rest)
+
+    where
+        dive = findType point
+
+
+potentialImportSourcesForName :: Name -> [Src.Import] -> [Src.Import]
+potentialImportSourcesForName name =
+    -- FIXME: if there is an explicit import, ignore others
+    List.filter
+        (\(Src.Import (A.At _ importName) alias exposing) ->
+            case exposing of
+                Src.Open ->
+                    -- FIXME: should be True, if it exposes everything,
+                    -- the name is potentially from there
+                    False
+
+                Src.Explicit exposed ->
+                    List.any
+                        (\a ->
+                            case a of
+                                Src.Upper (A.At _ uname) privacy ->
+                                    name == uname
+
+                                _ ->
+                                    False
+                       )
+                       exposed
+        )
+
+importsForQual :: Name -> [Src.Import] -> [Src.Import]
+importsForQual qual =
+    List.filter
+        (\(Src.Import (A.At _ importName) alias _) ->
+            importName == qual || alias == Just qual
+        )
+
+
+data FoundVar
+    = FoundVar Name
+    | FoundVarQual Name Name
+    deriving (Show)
+
+
+varAtPoint :: Watchtower.Editor.PointLocation -> Src.Module -> Maybe FoundVar
+varAtPoint point srcMod@(Src.Module name exports docs imports values unions aliases infixes effects) =
+    find
+        (\a ->
+            exprAtPointInValue point a
+                >>= varFromExpr srcMod
+        )
+        values
+
+
+varFromExpr :: Src.Module -> Src.Expr -> Maybe FoundVar
+varFromExpr srcMod@(Src.Module _ _ _ imports values unions aliases infixes effects) expr@(A.At _ expr_) =
+    case expr_ of
+        Src.Chr _ ->                    Nothing
+        Src.Str _ ->                    Nothing
+        Src.Int _ ->                    Nothing
+        Src.Float _ ->                  Nothing
+        Src.Var _ name ->               Just (FoundVar name)
+        Src.VarQual varType mod name -> Just (FoundVarQual mod name)
+        Src.List _ ->                   Nothing
+        Src.Op _ ->                     Nothing
+        Src.Negate _ ->                 Nothing
+        Src.Binops _ _ ->               Nothing
+        Src.Lambda _ _ ->               Nothing
+        Src.Call _ _ ->                 Nothing
+        Src.If _ _ ->                   Nothing
+        Src.Let _ _ ->                  Nothing
+        Src.Case _ _ ->                 Nothing
+        Src.Accessor _ ->               Nothing
+        Src.Access _ _ ->               Nothing
+        Src.Update _ _ ->               Nothing
+        Src.Record _ ->                 Nothing
+        Src.Unit  ->                    Nothing
+        Src.Tuple _ _ _ ->              Nothing
+        Src.Shader _ _ ->               Nothing
+
+
+exprAtPointInValue :: Watchtower.Editor.PointLocation -> A.Located Src.Value -> Maybe Src.Expr
+exprAtPointInValue (Watchtower.Editor.PointLocation _ point) (A.At region (Src.Value _ patterns expr typeAnn)) =
+    if withinRegion point region then
+        findExpr point patterns expr
+    else
+        Nothing
+
+
+findExpr :: A.Position -> [Src.Pattern] -> Src.Expr -> Maybe Src.Expr
+findExpr point foundPatterns expr@(A.At region _) =
+    if withinRegion point region then
+        case refineExprMatch point foundPatterns expr of
+            Nothing ->
+                Just expr
+
+            refined ->
+                refined
+
+    else
+        Nothing
+
+
+refineExprMatch :: A.Position -> [Src.Pattern] -> Src.Expr -> Maybe Src.Expr
+refineExprMatch point foundPatterns (A.At _ expr_) =
+    case expr_ of
+        Src.List exprs ->
+            find dive exprs
+
+        Src.Negate expr ->
+            dive expr
+
+        Src.Binops exprsAndNames expr ->
+            find dive (map fst exprsAndNames)
+                <|> dive expr
+
+        Src.Lambda patterns expr ->
+            -- find (findPattern point) patterns <|>
+            extendAndDive patterns expr
+
+        Src.Call expr exprs ->
+            find dive exprs
+                <|> dive expr
+
+        Src.If listTupleExprs expr ->
+            find
+                (\(one, two) ->
+                    dive one
+                        <|> dive two
+                )
+                listTupleExprs
+                <|> dive expr
+
+        Src.Let def expr ->
+            Nothing
+
+            -- FIXME: find defs and stuff
+            -- findDef point foundPatterns def
+            --    & orFind (extendAndDive [defNamePattern def]) expr
+
+        _ ->
+            Nothing
+
+        -- FIXME: find other kinds of exprs too
+        -- Can.LetRec defs expr ->
+        --     findFirstInList (findDef point foundPatterns) defs
+        --         & orFind (extendAndDive (map defNamePattern defs)) expr
+
+        -- Can.LetDestruct pattern one two ->
+        --     findPattern point pattern
+        --         & orFind dive one
+        --         & orFind (extendAndDive [pattern]) two
+
+        -- Can.Case expr branches ->
+        --     dive expr
+        --         & orFind
+        --             (findFirstInList $
+        --                 \(Can.CaseBranch pattern expr) ->
+        --                     findPattern point pattern
+        --                         & orFind (extendAndDive [pattern]) expr
+        --             )
+        --             branches
+
+        -- Can.Access expr locatedName ->
+        --     dive expr
+
+        -- Can.Update name expr fields ->
+        --     fields
+        --         & Map.toAscList
+        --         & findFirstInList
+        --             (\(fieldName, Can.FieldUpdate region fieldExpr) -> dive fieldExpr)
+        --         & orFind dive expr
+
+        -- Can.Record fields ->
+        --     fields
+        --         & Map.toAscList
+        --         & findFirstInList (\(fieldName, fieldExpr) -> dive fieldExpr)
+
+        -- Can.Tuple one two maybeThree ->
+        --     dive one
+        --         & orFind dive two
+        --         & orFind (maybe FoundNothing dive) maybeThree
+
+        -- _ ->
+        --     FoundNothing
+
+    where
+        dive = findExpr point foundPatterns
+
+        extendAndDive newPatterns = findExpr point (newPatterns ++ foundPatterns)
+
+
+findPattern :: A.Position -> Src.Pattern -> Maybe Src.Pattern
+findPattern point pattern@(A.At region _) =
+    if withinRegion point region then
+        case refinePatternMatch point pattern of
+            Nothing ->
+                Just pattern
+
+            refined ->
+                refined
+
+    else
+        Nothing
+
+
+refinePatternMatch :: A.Position -> Src.Pattern -> Maybe Src.Pattern
+refinePatternMatch point (A.At _ pattern_) =
+    -- FIXME: refine pattern matches
+    Nothing
 
 
 

@@ -7,7 +7,7 @@ module LanguageServer (serve) where
 import Control.Applicative ((<|>))
 import qualified Control.Concurrent.STM as STM
 import qualified Control.Exception
-import Control.Monad (guard, when, foldM)
+import Control.Monad (guard, when, foldM, mapM)
 import Control.Monad.Trans (MonadIO (liftIO))
 import Data.Aeson ((.:))
 import qualified Data.Aeson as Aeson
@@ -70,6 +70,11 @@ import qualified System.FilePath as Path
 import qualified Elm.ModuleName as ModuleName
 import qualified Ext.Dev.Package
 import Data.Name (Name)
+import Control.Concurrent
+import qualified Ext.Dev.Find.Source
+import qualified AST.Source as Src
+import qualified Data.Bifunctor
+
 
 serve :: IO ()
 serve = do
@@ -304,58 +309,14 @@ handleRequest state@(State mProjects) request =
       let location = Watchtower.Editor.PointLocation path position
       root <- fmap (Maybe.fromMaybe ".") (getRoot path state)
 
-      result <- Ext.CompileProxy.parse root path
-
-      pathAndPos <-
-        case result of
-          Right srcModule -> do
-            let found = Ext.Dev.Find.definition2 location srcModule
-
-            logWrite $ "Found: " ++ show found
-
-            case found of
-                Nothing ->
-                    pure (Left "Found nothing 😢")
-
-                Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At region val)) ->
-                    pure (Right ( path, region ))
-
-                Just (Ext.Dev.Find.FoundUnion (Ann.At region srcUnion)) ->
-                    pure (Right ( path, region ))
-
-                Just (Ext.Dev.Find.FoundAlias (Ann.At region alias_)) ->
-                    pure (Right ( path, region ))
-
-                Just (Ext.Dev.Find.FoundTVar (Ann.At region alias_)) ->
-                    pure (Right ( path, region ))
-
-                Just (Ext.Dev.Find.FoundExternal modName name) -> do
-                    Control.Monad.foldM
-                      (\acc mod ->
-                        case acc of
-                            Left _ ->
-                                findExternal root mod name
-
-                            found ->
-                                pure found
-                      )
-                      (Left "Did not find in any import 😢")
-                      (fst modName : snd modName)
-
-                Just _ ->
-                      (pure (Left "Found, but unhandled 😢"))
-
-          Left _  ->
-              pure (Left "Syntax error 😢")
-
-
+      pathAndPos <- findDefinition root location
 
       case pathAndPos of
-        Left err -> do
+        Nothing -> do
           sendProgressEnd "go-to-definition-progress"
-          respondErr reqId err
+          respondErr reqId "Definition not found"
 
-        Right (filePath, region@(Ann.Region (Ann.Position sr sc) (Ann.Position er ec))) ->
+        Just (filePath, region@(Ann.Region (Ann.Position sr sc) (Ann.Position er ec))) ->
           do
             sendProgressBegin "go-to-definition-progress" ("👀 Found definition: " ++ show region)
             sendProgressEnd "go-to-definition-progress"
@@ -431,74 +392,164 @@ handleRequest state@(State mProjects) request =
       sendProgressEnd "compile-progress"
 
 
-findExternal :: FilePath -> Name -> Name -> IO (Either String (FilePath, Ann.Region))
-findExternal root modName name = do
+findDefinition :: FilePath -> Watchtower.Editor.PointLocation -> IO (Maybe (FilePath, Ann.Region))
+findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
+    result <- Ext.CompileProxy.parse root path
+
+    case result of
+      Right srcModule ->
+          (findType root point srcModule
+              >>= maybe (findVarAtPoint root point srcModule) (pure . Just)
+          )
+              & fmap
+                  (maybe
+                      (Ext.Dev.Find.Source.definitionAtPoint point srcModule
+                          & fmap (\a -> (path, regionFromFound a))
+                      )
+                      Just
+                  )
+
+      Left _  ->
+          pure Nothing
+
+
+regionFromFound found =
+    case found of
+      (Ext.Dev.Find.Source.FoundValue _ (Ann.At region val)) ->
+          region
+
+      (Ext.Dev.Find.Source.FoundUnion _ (Ann.At region srcUnion)) ->
+          region
+
+      (Ext.Dev.Find.Source.FoundAlias _ (Ann.At region alias_)) ->
+          region
+
+
+findType :: FilePath -> Watchtower.Editor.PointLocation -> Src.Module -> IO (Maybe (FilePath, Ann.Region))
+findType root point@(Watchtower.Editor.PointLocation path _) srcModule = do
+    case Ext.Dev.Find.Source.typeAtPoint point srcModule of
+        Nothing ->
+            pure Nothing
+
+        Just tipe ->
+            case tipe of
+                Ext.Dev.Find.Source.FoundTVar (Ann.At region _) ->
+                    pure (Just ( path, region ))
+
+                Ext.Dev.Find.Source.FoundTType _ name -> do
+                    findVarNamed root path srcModule name
+
+
+                Ext.Dev.Find.Source.FoundTTypeQual region qual name -> do
+                    findQualVarNamed root srcModule qual name
+                        & fmap (fmap (Data.Bifunctor.second regionFromFound))
+
+
+findVarAtPoint :: FilePath -> Watchtower.Editor.PointLocation -> Src.Module -> IO (Maybe (FilePath, Ann.Region))
+findVarAtPoint root point@(Watchtower.Editor.PointLocation path _) srcModule = do
+    case Ext.Dev.Find.Source.varAtPoint point srcModule of
+        Nothing ->
+            pure Nothing
+
+        Just expr ->
+            case expr of
+                Ext.Dev.Find.Source.FoundVar name ->
+                    findVarNamed root path srcModule name
+
+                Ext.Dev.Find.Source.FoundVarQual qual name -> do
+                    findQualVarNamed root srcModule qual name
+                        & fmap (fmap (Data.Bifunctor.second regionFromFound))
+
+
+findVarNamed root path srcModule name = do
+    let
+        found =
+            Ext.Dev.Find.Source.definitionNamed name srcModule
+
+    case found of
+        Nothing -> do
+            let
+                imports =
+                    Ext.Dev.Find.Source.potentialImportSourcesForName name (Src._imports srcModule)
+
+            Control.Monad.foldM
+               (\acc mod ->
+                 case acc of
+                     Nothing ->
+                         findExternal root mod name
+                         & fmap (fmap (Data.Bifunctor.second regionFromFound))
+
+                     found ->
+                         pure found
+               )
+               Nothing
+               imports
+
+        Just found_ ->
+          pure (Just (path, regionFromFound found_))
+
+
+findQualVarNamed root srcModule qual name = do
+    let
+        imports =
+            Ext.Dev.Find.Source.importsForQual qual (Src._imports srcModule)
+
+    Control.Monad.foldM
+       (\acc mod ->
+         case acc of
+             Nothing ->
+                 findExternal root mod name
+
+             found ->
+                 pure found
+       )
+       Nothing
+       imports
+
+
+findExternal :: FilePath -> Src.Import -> Name -> IO (Maybe (FilePath, Ext.Dev.Find.Source.Found))
+findExternal root (Src.Import (Ann.At _ mod) _ _) name = do
     details <- Ext.CompileProxy.loadProject root
 
-    case Ext.Dev.Project.lookupModulePath details modName of
+    case Ext.Dev.Project.lookupModulePath details mod of
         Nothing -> do
-            case Ext.Dev.Project.lookupPkgName details modName of
+            case Ext.Dev.Project.lookupPkgName details mod of
                 Nothing ->
-                    pure (Left "Could not find package 😢")
+                    pure Nothing
 
                 Just pkgName -> do
                     maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
 
                     case maybeCurrentVersion of
                         Nothing ->
-                            pure (Left "Could not find package 😢")
+                            pure Nothing
+
                         Just version -> do
                             packageCache <- Stuff.getPackageCache
                             let home = Stuff.package packageCache pkgName version
-                            let path = home Path.</> "src" Path.</> ModuleName.toFilePath modName Path.<.>"elm"
+                            let path = home Path.</> "src" Path.</> ModuleName.toFilePath mod Path.<.>"elm"
                             loadedFile <- Ext.CompileProxy.loadPkgFileSource pkgName home path
 
                             case loadedFile of
                                 Left err ->
-                                    pure (Left "Could not find module 😢")
+                                    pure Nothing
 
                                 Right (_, source) ->
-                                    let found = Ext.Dev.Find.definitionNamed name source in
-
-                                    case found of
-                                        Nothing ->
-                                             pure (Left "Could not find named in pkg 😢")
-                                        Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At region val)) ->
-                                            pure (Right ( path, region ))
-
-                                        Just (Ext.Dev.Find.FoundUnion (Ann.At region srcUnion)) ->
-                                            pure (Right ( path, region ))
-
-                                        Just (Ext.Dev.Find.FoundAlias (Ann.At region alias_)) ->
-                                            pure (Right ( path, region ))
-
-                                        _ ->
-                                            pure (Left "Found in pkg, but unhandled 😢")
+                                    Ext.Dev.Find.Source.definitionNamed name source
+                                        & fmap (\found -> (path, found))
+                                        & pure
 
         Just path -> do
             loadedFile <- Ext.CompileProxy.parse root path
 
             case loadedFile of
-                Left err ->
-                    pure (Left "Could not find module 😢")
+                Left _ ->
+                    pure Nothing
 
                 Right source ->
-                    let found = Ext.Dev.Find.definitionNamed name source in
-                    case found of
-                        Nothing ->
-                            pure (Left $ "Could not find named in" ++ path ++ "😢")
-
-                        Just sourceFound@(Ext.Dev.Find.FoundValue (Ann.At region val)) ->
-                            pure (Right ( path, region ))
-
-                        Just (Ext.Dev.Find.FoundUnion (Ann.At region srcUnion)) ->
-                            pure (Right ( path, region ))
-
-                        Just (Ext.Dev.Find.FoundAlias (Ann.At region alias_)) ->
-                            pure (Right ( path, region ))
-
-                        a ->
-                            pure (Left "Found in external, but unhandled 😢")
+                    Ext.Dev.Find.Source.definitionNamed name source
+                        & fmap (\found -> (path, found))
+                        & pure
 
 
 
