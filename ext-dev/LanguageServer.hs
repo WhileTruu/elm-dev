@@ -391,7 +391,7 @@ handleRequest state@(State mProjects) request =
 
       sendProgressEnd "compile-progress"
 
-
+-- TODO: Move Find IO stuff to Find module
 findDefinition :: FilePath -> Watchtower.Editor.PointLocation -> IO (Maybe (FilePath, Ann.Region))
 findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
     result <- Ext.CompileProxy.parse root path
@@ -422,6 +422,9 @@ regionFromFound found =
           region
 
       (Ext.Dev.Find.Source.FoundAlias _ (Ann.At region alias_)) ->
+          region
+
+      (Ext.Dev.Find.Source.FoundCtor (Ann.At region _)) ->
           region
 
 
