@@ -49,7 +49,7 @@ withCanonical (Can.Module name exports docs decls unions aliases binops effects)
         FoundAlias _ (A.At loc alias_) ->
             FoundAlias (Map.lookup (toAliasName alias_) aliases) (A.At loc alias_)
 
-        FoundUnionCtor _ ->
+        FoundCtor _ ->
             found
 
 
@@ -282,8 +282,8 @@ varAtPoint point srcMod@(Src.Module name exports docs imports values unions alia
             exprAtPointInValue point a
                 >>= (\a ->
                     case a of
-                        Left _ -> Nothing -- FIXME: handle patterns
-                        Right expr -> varFromExpr srcMod expr
+                        Left pattern -> varFromPattern srcMod pattern
+                        Right expr ->   varFromExpr srcMod expr
                 )
         )
         values
@@ -316,10 +316,28 @@ varFromExpr srcMod@(Src.Module _ _ _ imports values unions aliases infixes effec
         Src.Shader _ _ ->               Nothing
 
 
+varFromPattern :: Src.Module -> Src.Pattern -> Maybe FoundVar
+varFromPattern srcMod@(Src.Module _ _ _ imports values unions aliases infixes effects) pattern@(A.At _ pattern_) =
+    case pattern_ of
+        Src.PAnything ->               Nothing
+        Src.PVar _ ->                  Nothing
+        Src.PRecord _ ->               Nothing
+        Src.PAlias _ _ ->              Nothing
+        Src.PUnit ->                   Nothing
+        Src.PTuple _ _ _ ->            Nothing
+        Src.PCtor _ name _ ->          Just (FoundVar name)
+        Src.PCtorQual _ qual name _ -> Just (FoundVarQual qual name)
+        Src.PList _ ->                 Nothing
+        Src.PCons a b ->               Nothing
+        Src.PChr _ ->                  Nothing
+        Src.PStr _ ->                  Nothing
+        Src.PInt _ ->                  Nothing
+
+
 exprAtPointInValue
     :: Watchtower.Editor.PointLocation
     -> A.Located Src.Value
-    -> Maybe (Either (Src.Pattern, [Src.Pattern]) Src.Expr)
+    -> Maybe (Either Src.Pattern Src.Expr)
 exprAtPointInValue (Watchtower.Editor.PointLocation _ point) (A.At region (Src.Value _ patterns expr typeAnn)) =
     if withinRegion point region then
         findExpr point patterns expr
@@ -328,11 +346,7 @@ exprAtPointInValue (Watchtower.Editor.PointLocation _ point) (A.At region (Src.V
         Nothing
 
 
-findExpr
-    :: A.Position
-    -> [Src.Pattern]
-    -> Src.Expr
-    -> Maybe (Either (Src.Pattern, [Src.Pattern]) Src.Expr)
+findExpr :: A.Position -> [Src.Pattern] -> Src.Expr -> Maybe (Either Src.Pattern Src.Expr)
 findExpr point foundPatterns expr@(A.At region _) =
     if withinRegion point region then
         case refineExprMatch point foundPatterns expr of
@@ -346,11 +360,7 @@ findExpr point foundPatterns expr@(A.At region _) =
         Nothing
 
 
-refineExprMatch
-    :: A.Position
-    -> [Src.Pattern]
-    -> Src.Expr
-    -> Maybe (Either (Src.Pattern, [Src.Pattern]) Src.Expr)
+refineExprMatch :: A.Position -> [Src.Pattern] -> Src.Expr -> Maybe (Either Src.Pattern Src.Expr)
 refineExprMatch point foundPatterns (A.At _ expr_) =
     case expr_ of
         Src.Chr _ ->
@@ -385,12 +395,7 @@ refineExprMatch point foundPatterns (A.At _ expr_) =
                 <|> dive expr
 
         Src.Lambda patterns expr ->
-            find
-                (\a ->
-                    findPattern point a
-                        & fmap (\p -> Left (p, foundPatterns))
-                )
-                patterns
+            find (fmap Left . findPattern point) patterns
                 <|> extendAndDive patterns expr
 
         Src.Call expr exprs ->
@@ -408,16 +413,12 @@ refineExprMatch point foundPatterns (A.At _ expr_) =
                         (Maybe.mapMaybe (defNamePattern . A.toValue) defs)
                         expr
 
-
-
         Src.Case expr branches ->
             dive expr
                 & orFind
                     (\(pattern, branchExpr) ->
-                        (findPattern point pattern
-                            & fmap (\p -> Left (p, foundPatterns))
-                        )
-                        <|> extendAndDive [pattern] branchExpr
+                        (findPattern point pattern & fmap Left)
+                            <|> extendAndDive [pattern] branchExpr
                     )
                     branches
 
@@ -448,25 +449,15 @@ refineExprMatch point foundPatterns (A.At _ expr_) =
         extendAndDive newPatterns = findExpr point (newPatterns ++ foundPatterns)
 
 
-findDef
-    :: A.Position -> [Src.Pattern]
-    -> Src.Def
-    -> Maybe (Either (Src.Pattern, [Src.Pattern]) Src.Expr)
+findDef :: A.Position -> [Src.Pattern] -> Src.Def -> Maybe (Either Src.Pattern Src.Expr)
 findDef point foundPatterns def =
     case def of
         Src.Define locatedName patterns expr _ ->
-            find
-                (\a ->
-                    findPattern point a
-                        & fmap (\p -> Left (p, foundPatterns))
-                )
-                patterns
+            find (fmap Left . findPattern point) patterns
                 <|> findExpr point (patterns ++ foundPatterns) expr
 
         Src.Destruct pattern expr ->
-          (findPattern point pattern
-              & fmap (\p -> Left (p, foundPatterns))
-          )
+          (findPattern point pattern & fmap Left)
               <|> findExpr point (pattern : foundPatterns) expr
 
 
