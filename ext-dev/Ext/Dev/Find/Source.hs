@@ -181,11 +181,11 @@ foundFromType srcMod@(Src.Module _ _ _ imports values unions aliases _ _) tipe@(
         Src.TVar name ->               Just (FoundTVar (A.At region name))
         Src.TType _ name _ ->          definitionNamed name srcMod
                                            <|> (case potentialImportSourcesForName name imports of
-                                                    [import_] -> Just (FoundExternalOpts [import_] name)
+                                                    opt : opts -> Just (FoundExternalOpts (opt : opts) name)
                                                     _ -> Nothing
                                                 )
         Src.TTypeQual _ qual name _ -> (case importsForQual qual imports of
-                                            [import_] -> Just (FoundExternalOpts [import_] name)
+                                            opt : opts -> Just (FoundExternalOpts (opt : opts) name)
                                             _ -> Nothing
                                        )
         Src.TRecord _ _ ->             Nothing
@@ -302,11 +302,11 @@ varFromExpr srcMod@(Src.Module _ _ _ imports values unions aliases infixes effec
         Src.Var _ name ->                (find (findPatternIntroducing name) patterns & fmap FoundPattern)
                                              <|> definitionNamed name srcMod
                                              <|> (case potentialImportSourcesForName name imports of
-                                                     [import_] -> Just (FoundExternalOpts [import_] name)
+                                                     opt : opts -> Just (FoundExternalOpts (opt : opts) name)
                                                      _ -> Nothing
                                                  )
         Src.VarQual varType qual name -> (case importsForQual qual imports of
-                                             [import_] -> Just (FoundExternalOpts [import_] name)
+                                             opt : opts -> Just (FoundExternalOpts (opt : opts) name)
                                              _ -> Nothing
                                          )
         Src.List _ ->                    Nothing
@@ -334,7 +334,7 @@ varFromPattern srcMod@(Src.Module _ _ _ imports _ _ _ _ _) patterns pattern@(A.A
         Src.PVar name ->               (find (findPatternIntroducing name) patterns & fmap FoundPattern)
                                            <|> definitionNamed name srcMod
                                            <|> (case potentialImportSourcesForName name imports of
-                                                   [import_] -> Just (FoundExternalOpts [import_] name)
+                                                   opt : opts -> Just (FoundExternalOpts (opt : opts) name)
                                                    _ -> Nothing
                                                )
         Src.PRecord _ ->               Nothing
@@ -343,11 +343,11 @@ varFromPattern srcMod@(Src.Module _ _ _ imports _ _ _ _ _) patterns pattern@(A.A
         Src.PTuple _ _ _ ->            Nothing
         Src.PCtor _ name _ ->          definitionNamed name srcMod
                                            <|> (case potentialImportSourcesForName name imports of
-                                                   [import_] -> Just (FoundExternalOpts [import_] name)
+                                                   opt : opts -> Just (FoundExternalOpts (opt : opts) name)
                                                    _ -> Nothing
                                                )
         Src.PCtorQual _ qual name _ -> (case importsForQual qual imports of
-                                           [import_] -> Just (FoundExternalOpts [import_] name)
+                                           opt : opts -> Just (FoundExternalOpts (opt : opts) name)
                                            _ -> Nothing
                                        )
         Src.PList _ ->                 Nothing
