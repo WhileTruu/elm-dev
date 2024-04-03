@@ -286,14 +286,14 @@ varAtPoint point srcMod@(Src.Module name exports docs imports values unions alia
                 >>= (\(patterns, a) ->
                     case a of
                         Left pattern -> varFromPattern srcMod patterns pattern
-                        Right expr ->   varFromExpr srcMod patterns expr
+                        Right expr ->   varFromExpr point srcMod patterns expr
                 )
         )
         values
 
 
-varFromExpr :: Src.Module -> [Src.Pattern] -> Src.Expr -> Maybe Found
-varFromExpr srcMod@(Src.Module _ _ _ imports values unions aliases infixes effects) patterns expr@(A.At _ expr_) =
+varFromExpr :: Watchtower.Editor.PointLocation -> Src.Module -> [Src.Pattern] -> Src.Expr -> Maybe Found
+varFromExpr (Watchtower.Editor.PointLocation _ point) srcMod@(Src.Module _ _ _ imports values unions aliases infixes effects) patterns expr@(A.At _ expr_) =
     case expr_ of
         Src.Chr _ ->                     Nothing
         Src.Str _ ->                     Nothing
@@ -316,7 +316,12 @@ varFromExpr srcMod@(Src.Module _ _ _ imports values unions aliases infixes effec
         Src.Lambda _ _ ->                Nothing
         Src.Call _ _ ->                  Nothing
         Src.If _ _ ->                    Nothing
-        Src.Let _ _ ->                   Nothing
+        Src.Let defs _ ->
+            find (\(A.At _ def) ->
+                case def of
+                    Src.Define _ _ _ type_ -> type_ >>= findType point >>= foundFromType srcMod
+                    Src.Destruct pattern expr -> Nothing
+            ) defs
         Src.Case _ _ ->                  Nothing
         Src.Accessor _ ->                Nothing
         Src.Access _ _ ->                Nothing
