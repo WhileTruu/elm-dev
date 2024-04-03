@@ -454,14 +454,19 @@ findVarAtPoint root point@(Watchtower.Editor.PointLocation path _) srcModule = d
         Nothing ->
             pure Nothing
 
-        Just expr ->
-            case expr of
+        Just foundVar -> do
+            logWrite $ "found var: " ++ show foundVar 
+
+            case foundVar of
                 Ext.Dev.Find.Source.FoundVar name ->
                     findVarNamed root path srcModule name
 
                 Ext.Dev.Find.Source.FoundVarQual qual name -> do
                     findQualVarNamed root srcModule qual name
                         & fmap (fmap (Data.Bifunctor.second regionFromFound))
+
+                Ext.Dev.Find.Source.FoundPattern (Ann.At region _)-> do
+                    pure (Just (path, region))
 
 
 findVarNamed root path srcModule name = do
