@@ -397,11 +397,13 @@ findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
     result <- Ext.CompileProxy.parse root path
 
     case result of
-      Right srcModule ->
+      Right srcModule -> do
           let
               found =
                   Ext.Dev.Find.Source.definitionAtPoint point srcModule
-          in
+
+          logWrite $ "Found: " ++ show found
+
           case found of
             Nothing ->
                 pure Nothing
