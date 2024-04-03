@@ -423,6 +423,12 @@ findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
             Just (Ext.Dev.Find.Source.FoundCtor (Ann.At region _)) ->
                 pure (Just (path, region))
 
+            Just (Ext.Dev.Find.Source.FoundDef (Src.Define (Ann.At region _) _ _ _)) ->
+                pure (Just (path, region))
+
+            Just (Ext.Dev.Find.Source.FoundDef (Src.Destruct (Ann.At region _) _)) ->
+                pure (Just (path, region))
+
             Just (Ext.Dev.Find.Source.FoundPattern (Ann.At region _)) ->
                 pure (Just (path, region))
 

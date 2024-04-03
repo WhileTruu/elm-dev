@@ -21,6 +21,7 @@ import qualified Data.Map as Map
 import Data.Function ((&))
 import GHC.Base ((<|>))
 import qualified Data.Maybe as Maybe
+import Debug.Trace (traceShow)
 
 
 data Found
@@ -30,6 +31,7 @@ data Found
     | FoundTVar (A.Located Name)
     | FoundCtor (A.Located Name)
     | FoundPattern Src.Pattern
+    | FoundDef Src.Def
     | FoundExternalOpts [Src.Import] Name
     deriving (Show)
 
@@ -59,6 +61,9 @@ withCanonical (Can.Module name exports docs decls unions aliases binops effects)
             found
 
         FoundPattern _ ->
+            found
+
+        FoundDef _ ->
             found
 
         FoundExternalOpts _ _ ->
@@ -280,86 +285,214 @@ importsForQual qual =
 
 varAtPoint :: Watchtower.Editor.PointLocation -> Src.Module -> Maybe Found
 varAtPoint point srcMod@(Src.Module name exports docs imports values unions aliases infixes effects) =
-    find
-        (\a ->
-            exprAtPointInValue point a
-                >>= (\(patterns, a) ->
-                    case a of
-                        Left pattern -> varFromPattern srcMod patterns pattern
-                        Right expr ->   varFromExpr point srcMod patterns expr
-                )
-        )
-        values
+    find (exprAtPointInValue srcMod point) values
 
 
-varFromExpr :: Watchtower.Editor.PointLocation -> Src.Module -> [Src.Pattern] -> Src.Expr -> Maybe Found
-varFromExpr (Watchtower.Editor.PointLocation _ point) srcMod@(Src.Module _ _ _ imports values unions aliases infixes effects) patterns expr@(A.At _ expr_) =
+exprAtPointInValue
+    :: Src.Module 
+    -> Watchtower.Editor.PointLocation
+    -> A.Located Src.Value
+    -> Maybe Found
+exprAtPointInValue srcMod (Watchtower.Editor.PointLocation _ point) (A.At region (Src.Value _ patterns expr typeAnn)) =
+    if withinRegion point region then
+        findExpr srcMod point patterns expr
+
+    else
+        Nothing
+
+
+findExpr :: Src.Module -> A.Position -> [Src.Pattern] -> Src.Expr -> Maybe Found
+findExpr srcMod point foundPatterns expr@(A.At region _) =
+    if withinRegion point region then
+        refineExprMatch srcMod point foundPatterns expr
+
+    else
+        Nothing
+
+
+refineExprMatch :: Src.Module -> A.Position -> [Src.Pattern] -> Src.Expr -> Maybe Found
+refineExprMatch srcMod@(Src.Module _ _ _ imports _ _ _ _ _) point foundPatterns (A.At _ expr_) = do
+    traceShow expr_ (pure ())
+
     case expr_ of
-        Src.Chr _ ->                     Nothing
-        Src.Str _ ->                     Nothing
-        Src.Int _ ->                     Nothing
-        Src.Float _ ->                   Nothing
-        Src.Var _ name ->                (find (findPatternIntroducing name) patterns & fmap FoundPattern)
-                                             <|> definitionNamed name srcMod
-                                             <|> (case potentialImportSourcesForName name imports of
-                                                     opt : opts -> Just (FoundExternalOpts (opt : opts) name)
-                                                     _ -> Nothing
-                                                 )
-        Src.VarQual varType qual name -> (case importsForQual qual imports of
-                                             opt : opts -> Just (FoundExternalOpts (opt : opts) name)
-                                             _ -> Nothing
-                                         )
-        Src.List _ ->                    Nothing
-        Src.Op _ ->                      Nothing
-        Src.Negate _ ->                  Nothing
-        Src.Binops _ _ ->                Nothing
-        Src.Lambda _ _ ->                Nothing
-        Src.Call _ _ ->                  Nothing
-        Src.If _ _ ->                    Nothing
-        Src.Let defs _ ->
-            find (\(A.At _ def) ->
-                case def of
-                    Src.Define _ _ _ type_ -> type_ >>= findType point >>= foundFromType srcMod
-                    Src.Destruct pattern expr -> Nothing
-            ) defs
-        Src.Case _ _ ->                  Nothing
-        Src.Accessor _ ->                Nothing
-        Src.Access _ _ ->                Nothing
-        Src.Update _ _ ->                Nothing
-        Src.Record _ ->                  Nothing
-        Src.Unit  ->                     Nothing
-        Src.Tuple _ _ _ ->               Nothing
-        Src.Shader _ _ ->                Nothing
+        Src.Chr _ ->
+            Nothing
+
+        Src.Str _ ->
+            Nothing
+
+        Src.Int _ ->
+            Nothing
+
+        Src.Float _ ->
+            Nothing
+
+        Src.Var _ name ->
+            (find (findPatternIntroducing name) foundPatterns & fmap FoundPattern)
+                <|> definitionNamed name srcMod
+                <|> (case potentialImportSourcesForName name imports of
+                        opt : opts -> Just (FoundExternalOpts (opt : opts) name)
+                        _ -> Nothing
+                    )
+
+        Src.VarQual varType qual name -> 
+            case importsForQual qual imports of
+                opt : opts -> Just (FoundExternalOpts (opt : opts) name)
+                _ -> Nothing
+
+        Src.List exprs ->
+            find dive exprs
+
+        Src.Op _ ->
+            Nothing
+
+        Src.Negate expr ->
+            dive expr
+
+        Src.Binops exprsAndNames expr ->
+            find dive (map fst exprsAndNames)
+                <|> dive expr
+
+        Src.Lambda patterns expr ->
+            find (findPattern srcMod point foundPatterns) patterns
+                <|> extendAndDive patterns expr
+
+        Src.Call expr exprs ->
+            find dive exprs
+                <|> dive expr
+
+        Src.If listTupleExprs expr ->
+            find (\(one, two) -> dive one <|> dive two) listTupleExprs
+                <|> dive expr
+
+        Src.Let defs expr ->
+            find (findDef srcMod point foundPatterns . A.toValue) defs
+                <|> dive expr
+
+        Src.Case expr branches ->
+            dive expr
+                <|> find
+                    (\(pattern, branchExpr) ->
+                        findPattern srcMod point foundPatterns pattern
+                            <|> extendAndDive [pattern] branchExpr
+                    )
+                    branches
+
+        Src.Accessor _ ->
+            Nothing
+
+        Src.Access expr _ ->
+            dive expr
+
+        Src.Update _ fields ->
+            find (\(_, fieldExpr) -> dive fieldExpr) fields
+
+        Src.Record fields ->
+            find (\(_, fieldExpr) -> dive fieldExpr) fields
+
+        Src.Unit ->
+            Nothing
+
+        Src.Tuple exprA exprB exprs ->
+            find dive (exprA : exprB : exprs)
+
+        Src.Shader _ _ ->
+            Nothing
+
+    where
+        dive = findExpr srcMod point foundPatterns
+
+        extendAndDive newPatterns = findExpr srcMod point (newPatterns ++ foundPatterns)
 
 
-varFromPattern :: Src.Module -> [Src.Pattern] -> Src.Pattern -> Maybe Found
-varFromPattern srcMod@(Src.Module _ _ _ imports _ _ _ _ _) patterns pattern@(A.At _ pattern_) =
+findDef :: Src.Module -> A.Position -> [Src.Pattern] -> Src.Def -> Maybe Found
+findDef srcMod point foundPatterns def =
+    case def of
+        Src.Define locatedName patterns expr type_ ->
+            find (findPattern srcMod point foundPatterns) patterns
+                <|> findExpr srcMod point (patterns ++ foundPatterns) expr
+                <|> (type_ >>= findType point >>= foundFromType srcMod)
+                <|> (if withinRegion point (A.toRegion locatedName) then
+                        Just (FoundDef def)
+
+                     else
+                        Nothing
+                    )
+
+        Src.Destruct pattern expr ->
+          findPattern srcMod point foundPatterns pattern
+              <|> findExpr srcMod point (pattern : foundPatterns) expr
+              <|> (if withinRegion point (A.toRegion pattern) then
+                      Just (FoundDef def)
+
+                   else
+                      Nothing
+                  )
+
+findPattern :: Src.Module -> A.Position -> [Src.Pattern] -> Src.Pattern -> Maybe Found
+findPattern srcMod point foundPatterns pattern@(A.At region _) =
+    if withinRegion point region then
+        refinePatternMatch srcMod point foundPatterns pattern
+
+    else
+        Nothing
+
+
+refinePatternMatch :: Src.Module -> A.Position -> [Src.Pattern] -> Src.Pattern -> Maybe Found
+refinePatternMatch srcMod@(Src.Module _ _ _ imports _ _ _ _ _) point foundPatterns (A.At _ pattern_) =
     case pattern_ of
-        Src.PAnything ->               Nothing
-        Src.PVar name ->               (find (findPatternIntroducing name) patterns & fmap FoundPattern)
-                                           <|> definitionNamed name srcMod
-                                           <|> (case potentialImportSourcesForName name imports of
-                                                   opt : opts -> Just (FoundExternalOpts (opt : opts) name)
-                                                   _ -> Nothing
-                                               )
-        Src.PRecord _ ->               Nothing
-        Src.PAlias _ _ ->              Nothing
-        Src.PUnit ->                   Nothing
-        Src.PTuple _ _ _ ->            Nothing
-        Src.PCtor _ name _ ->          definitionNamed name srcMod
-                                           <|> (case potentialImportSourcesForName name imports of
-                                                   opt : opts -> Just (FoundExternalOpts (opt : opts) name)
-                                                   _ -> Nothing
-                                               )
-        Src.PCtorQual _ qual name _ -> (case importsForQual qual imports of
-                                           opt : opts -> Just (FoundExternalOpts (opt : opts) name)
-                                           _ -> Nothing
-                                       )
-        Src.PList _ ->                 Nothing
-        Src.PCons a b ->               Nothing
-        Src.PChr _ ->                  Nothing
-        Src.PStr _ ->                  Nothing
-        Src.PInt _ ->                  Nothing
+        Src.PAnything ->
+            Nothing
+
+        Src.PVar name -> 
+            (find (findPatternIntroducing name) foundPatterns & fmap FoundPattern)
+                <|> definitionNamed name srcMod
+                <|> (case potentialImportSourcesForName name imports of
+                        opt : opts -> Just (FoundExternalOpts (opt : opts) name)
+                        _ -> Nothing
+                    )
+
+        Src.PRecord _ ->
+            Nothing
+
+        Src.PAlias pattern name ->
+            findPattern srcMod point foundPatterns pattern
+
+        Src.PUnit ->
+            Nothing
+
+        Src.PTuple a b rest ->
+            find (findPattern srcMod point foundPatterns) (a : b : rest)
+
+        Src.PCtor _ name patterns -> 
+            find (findPattern srcMod point foundPatterns) patterns
+                <|> definitionNamed name srcMod
+                <|> (case potentialImportSourcesForName name imports of
+                        opt : opts -> Just (FoundExternalOpts (opt : opts) name)
+                        _ -> Nothing
+                    )
+
+        Src.PCtorQual _ qual name patterns -> 
+            find (findPattern srcMod point foundPatterns) patterns
+                <|> (case importsForQual qual imports of
+                        opt : opts -> Just (FoundExternalOpts (opt : opts) name)
+                        _ -> Nothing
+                    )
+
+        Src.PList patterns ->
+            find (findPattern srcMod point foundPatterns) patterns
+
+        Src.PCons a b ->
+            find (findPattern srcMod point foundPatterns) [a, b]
+
+        Src.PChr _ ->
+            Nothing
+
+        Src.PStr _ ->
+            Nothing
+
+        Src.PInt _ ->
+            Nothing
 
 
 findPatternIntroducing :: Name -> Src.Pattern -> Maybe Src.Pattern
@@ -400,175 +533,3 @@ findPatternIntroducing name pattern@(A.At _ pattern_) =
 
     _ ->
         Nothing
-
-
-exprAtPointInValue
-    :: Watchtower.Editor.PointLocation
-    -> A.Located Src.Value
-    -> Maybe ([Src.Pattern], Either Src.Pattern Src.Expr)
-exprAtPointInValue (Watchtower.Editor.PointLocation _ point) (A.At region (Src.Value _ patterns expr typeAnn)) =
-    if withinRegion point region then
-        findExpr point patterns expr
-
-    else
-        Nothing
-
-
-findExpr :: A.Position -> [Src.Pattern] -> Src.Expr -> Maybe ([Src.Pattern], Either Src.Pattern Src.Expr)
-findExpr point foundPatterns expr@(A.At region _) =
-    if withinRegion point region then
-        case refineExprMatch point foundPatterns expr of
-            Nothing ->
-                Just (foundPatterns, Right expr)
-
-            refined ->
-                refined
-
-    else
-        Nothing
-
-
-refineExprMatch :: A.Position -> [Src.Pattern] -> Src.Expr -> Maybe ([Src.Pattern], Either Src.Pattern Src.Expr)
-refineExprMatch point foundPatterns (A.At _ expr_) =
-    case expr_ of
-        Src.Chr _ ->
-            Nothing
-
-        Src.Str _ ->
-            Nothing
-
-        Src.Int _ ->
-            Nothing
-
-        Src.Float _ ->
-            Nothing
-
-        Src.Var _ _ ->
-            Nothing
-
-        Src.VarQual {} ->
-            Nothing
-
-        Src.List exprs ->
-            find dive exprs
-
-        Src.Op _ ->
-            Nothing
-
-        Src.Negate expr ->
-            dive expr
-
-        Src.Binops exprsAndNames expr ->
-            find dive (map fst exprsAndNames)
-                <|> dive expr
-
-        Src.Lambda patterns expr ->
-            find (fmap (\a -> (foundPatterns, Left a)) . findPattern point) patterns
-                <|> extendAndDive patterns expr
-
-        Src.Call expr exprs ->
-            find dive exprs
-                <|> dive expr
-
-        Src.If listTupleExprs expr ->
-            find (\(one, two) -> dive one <|> dive two) listTupleExprs
-                <|> dive expr
-
-        Src.Let defs expr ->
-            find (findDef point foundPatterns . A.toValue) defs
-                <|>
-                    extendAndDive
-                        (Maybe.mapMaybe (defNamePattern . A.toValue) defs)
-                        expr
-
-        Src.Case expr branches ->
-            dive expr
-                <|> find
-                    (\(pattern, branchExpr) ->
-                        (findPattern point pattern & fmap (\a -> (foundPatterns, Left a)))
-                            <|> extendAndDive [pattern] branchExpr
-                    )
-                    branches
-
-        Src.Accessor _ ->
-            Nothing
-
-        Src.Access expr _ ->
-            dive expr
-
-        Src.Update _ fields ->
-            find (\(_, fieldExpr) -> dive fieldExpr) fields
-
-        Src.Record fields ->
-            find (\(_, fieldExpr) -> dive fieldExpr) fields
-
-        Src.Unit ->
-            Nothing
-
-        Src.Tuple exprA exprB exprs ->
-            find dive (exprA : exprB : exprs)
-
-        Src.Shader _ _ ->
-            Nothing
-
-    where
-        dive = findExpr point foundPatterns
-
-        extendAndDive newPatterns = findExpr point (newPatterns ++ foundPatterns)
-
-
-findDef :: A.Position -> [Src.Pattern] -> Src.Def -> Maybe ([Src.Pattern], Either Src.Pattern Src.Expr)
-findDef point foundPatterns def =
-    case def of
-        Src.Define locatedName patterns expr _ ->
-            find (fmap (\a -> (foundPatterns, Left a)) . findPattern point) patterns
-                <|> findExpr point (patterns ++ foundPatterns) expr
-
-        Src.Destruct pattern expr ->
-          (findPattern point pattern & fmap (\a -> (foundPatterns, Left a)))
-              <|> findExpr point (pattern : foundPatterns) expr
-
-
-defNamePattern :: Src.Def -> Maybe Src.Pattern
-defNamePattern def =
-    case def of
-        Src.Define (A.At region name) _ _ _ ->
-            Just $ A.At region $ Src.PVar name
-
-        Src.Destruct _ _ ->
-            Nothing
-
-
-findPattern :: A.Position -> Src.Pattern -> Maybe Src.Pattern
-findPattern point pattern@(A.At region _) =
-    if withinRegion point region then
-        case refinePatternMatch point pattern of
-            Nothing ->
-                Just pattern
-
-            refined ->
-                refined
-
-    else
-        Nothing
-
-
-refinePatternMatch :: A.Position -> Src.Pattern -> Maybe Src.Pattern
-refinePatternMatch point (A.At _ pattern_) =
-    case pattern_ of
-        Src.PAnything -> Nothing
-        Src.PVar _ -> Nothing
-        Src.PRecord _ -> Nothing
-        Src.PAlias pattern name -> findPattern point pattern
-        Src.PUnit -> Nothing
-        Src.PTuple a b rest -> find (findPattern point) (a : b : rest)
-        Src.PCtor _ _ patterns -> find (findPattern point) patterns
-        Src.PCtorQual _ _ _ patterns -> find (findPattern point) patterns
-        Src.PList patterns -> find (findPattern point) patterns
-        Src.PCons a b -> find (findPattern point) [a, b]
-        Src.PChr _ -> Nothing
-        Src.PStr _ -> Nothing
-        Src.PInt _ -> Nothing
-
-
-
