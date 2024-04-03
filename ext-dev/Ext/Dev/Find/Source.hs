@@ -4,10 +4,8 @@ module Ext.Dev.Find.Source
   ( definitionNamed
   , definitionAtPoint, Found(..)
   , withCanonical, Def(..)
-  , typeAtPoint, FoundType(..)
   , potentialImportSourcesForName
   , importsForQual
-  , varAtPoint, FoundVar(..)
   )
 where
 
@@ -29,7 +27,10 @@ data Found
     = FoundValue (Maybe Def) (A.Located Src.Value)
     | FoundUnion (Maybe Can.Union) (A.Located Src.Union)
     | FoundAlias (Maybe Can.Alias) (A.Located Src.Alias)
+    | FoundTVar (A.Located Name)
     | FoundCtor (A.Located Name)
+    | FoundPattern Src.Pattern
+    | FoundExternalOpts [Src.Import] Name
     deriving (Show)
 
 
@@ -45,13 +46,22 @@ withCanonical (Can.Module name exports docs decls unions aliases binops effects)
         FoundValue _ value@(A.At loc (Src.Value (A.At _ name) patterns_ expr_ maybeType_)) ->
             FoundValue (getDefNamed name decls) value
 
-        FoundUnion _ (union@(A.At loc (Src.Union (A.At _ name) _ _))) ->
+        FoundUnion _ union@(A.At loc (Src.Union (A.At _ name) _ _)) ->
             FoundUnion (Map.lookup name unions) union
 
         FoundAlias _ (A.At loc alias_) ->
             FoundAlias (Map.lookup (toAliasName alias_) aliases) (A.At loc alias_)
 
         FoundCtor _ ->
+            found
+
+        FoundTVar _ ->
+            found
+
+        FoundPattern _ ->
+            found
+
+        FoundExternalOpts _ _ ->
             found
 
 
@@ -87,9 +97,9 @@ defNamed name def =
 definitionNamed :: Name -> Src.Module -> Maybe Found
 definitionNamed valueName (Src.Module name exports docs imports values unions aliases infixes effects) =
     find (ctorNamed valueName FoundCtor) unions
-        & orFind (withName valueName toValueName (FoundValue Nothing)) values
-        & orFind (withName valueName toUnionName (FoundUnion Nothing)) unions
-        & orFind (withName valueName toAliasName (FoundAlias Nothing)) aliases
+        <|> find (withName valueName toValueName (FoundValue Nothing)) values
+        <|> find (withName valueName toUnionName (FoundUnion Nothing)) unions
+        <|> find (withName valueName toAliasName (FoundAlias Nothing)) aliases
 
 
 ctorNamed :: Name -> (A.Located Name -> Found) -> A.Located Src.Union -> Maybe Found
@@ -98,7 +108,7 @@ ctorNamed name toResult (A.At unionRegion (Src.Union _ _ ctors)) =
 
 
 withName :: Name -> (a -> Name) ->  (A.Located a -> Found) ->  A.Located a -> Maybe Found
-withName name getName toFound (locatedItem@(A.At _ val)) =
+withName name getName toFound locatedItem@(A.At _ val) =
     if name == getName val then
         Just (toFound locatedItem)
     else
@@ -119,40 +129,36 @@ toAliasName (Src.Alias (A.At _ name) _ _) =
 
 
 definitionAtPoint :: Watchtower.Editor.PointLocation -> Src.Module -> Maybe Found
-definitionAtPoint point (Src.Module name exports docs imports values unions aliases infixes effects) =
-    find (atLocation point (FoundValue Nothing)) values
-        & orFind (atLocation point (FoundUnion Nothing)) unions
-        & orFind (atLocation point (FoundAlias Nothing)) aliases
+definitionAtPoint point srcMod@(Src.Module name exports docs imports values unions aliases infixes effects) =
+    typeAtPoint point srcMod
+        <|> varAtPoint point srcMod
+        <|> find (atLocation point (FoundValue Nothing)) values
+        <|> find (atLocation point (FoundUnion Nothing)) unions
+        <|> find (atLocation point (FoundAlias Nothing)) aliases
 
 
 atLocation :: Watchtower.Editor.PointLocation -> (A.Located a -> Found) -> A.Located a -> Maybe Found
-atLocation (Watchtower.Editor.PointLocation _ point) toFound (locatedItem@(A.At region _)) =
+atLocation (Watchtower.Editor.PointLocation _ point) toFound locatedItem@(A.At region _) =
     if withinRegion point region then
         Just (toFound locatedItem)
+
     else
         Nothing
 
+
 find :: (a -> Maybe found) -> [ a ] -> Maybe found
-find toResult items =
+find toResult =
     List.foldl
         (\found located ->
             case found of
                 Nothing ->
-                    (toResult located)
+                    toResult located
 
                 Just _ ->
                     found
 
-        ) Nothing items
-
-orFind :: (a -> Maybe found) -> [ a ] -> Maybe found -> Maybe found
-orFind toResult items previousResult =
-    case previousResult of
-        Nothing ->
-           find toResult items
-
-        _ ->
-            previousResult
+        ) 
+        Nothing 
 
 
 withinRegion :: A.Position -> A.Region -> Bool
@@ -161,27 +167,27 @@ withinRegion (A.Position row col) (A.Region (A.Position startRow startCol) (A.Po
         && (row == endRow && col <= endCol || row < endRow)
 
 
-data FoundType
-    = FoundTVar (A.Located Name)
-    | FoundTType A.Region Name
-    | FoundTTypeQual A.Region Name Name
-    deriving (Show)
-
-
-typeAtPoint :: Watchtower.Editor.PointLocation -> Src.Module -> Maybe FoundType
+typeAtPoint :: Watchtower.Editor.PointLocation -> Src.Module -> Maybe Found
 typeAtPoint point srcMod@(Src.Module name exports docs imports values unions aliases infixes effects) =
     find (\a -> typeAtPointInValue point a >>= foundFromType srcMod) values
-        & orFind (\a -> typeAtPointInAlias point a >>= foundFromType srcMod) aliases
-        & orFind (\a -> typeAtPointInUnion point a >>= foundFromType srcMod) unions
+        <|> find (\a -> typeAtPointInAlias point a >>= foundFromType srcMod) aliases
+        <|> find (\a -> typeAtPointInUnion point a >>= foundFromType srcMod) unions
 
 
-foundFromType :: Src.Module -> Src.Type -> Maybe FoundType
+foundFromType :: Src.Module -> Src.Type -> Maybe Found
 foundFromType srcMod@(Src.Module _ _ _ imports values unions aliases _ _) tipe@(A.At region type_) =
     case type_ of
         Src.TLambda _ _ ->             Nothing
         Src.TVar name ->               Just (FoundTVar (A.At region name))
-        Src.TType _ name _ ->          Just (FoundTType region name)
-        Src.TTypeQual _ qual name _ -> Just (FoundTTypeQual region qual name)
+        Src.TType _ name _ ->          definitionNamed name srcMod
+                                           <|> (case potentialImportSourcesForName name imports of
+                                                    [import_] -> Just (FoundExternalOpts [import_] name)
+                                                    _ -> Nothing
+                                                )
+        Src.TTypeQual _ qual name _ -> (case importsForQual qual imports of
+                                            [import_] -> Just (FoundExternalOpts [import_] name)
+                                            _ -> Nothing
+                                       )
         Src.TRecord _ _ ->             Nothing
         Src.TUnit ->                   Nothing
         Src.TTuple _ _ _ ->            Nothing
@@ -227,7 +233,7 @@ findType point tipe@(A.At region type_) =
 refineTypeMatch :: A.Position -> Src.Type -> Maybe Src.Type
 refineTypeMatch point tipe@(A.At region type_) =
     case type_ of
-        Src.TLambda arg ret ->          dive arg & orFind dive [ret]
+        Src.TLambda arg ret ->          dive arg <|> find dive [ret]
         Src.TVar _ ->                   Nothing
         Src.TType _ _ tvars ->          find dive tvars
         Src.TTypeQual _ _ _ tvars ->    find dive tvars
@@ -263,6 +269,7 @@ potentialImportSourcesForName name =
                        exposed
         )
 
+
 importsForQual :: Name -> [Src.Import] -> [Src.Import]
 importsForQual qual =
     List.filter
@@ -271,14 +278,7 @@ importsForQual qual =
         )
 
 
-data FoundVar
-    = FoundVar Name
-    | FoundVarQual Name Name
-    | FoundPattern Src.Pattern
-    deriving (Show)
-
-
-varAtPoint :: Watchtower.Editor.PointLocation -> Src.Module -> Maybe FoundVar
+varAtPoint :: Watchtower.Editor.PointLocation -> Src.Module -> Maybe Found
 varAtPoint point srcMod@(Src.Module name exports docs imports values unions aliases infixes effects) =
     find
         (\a ->
@@ -292,45 +292,64 @@ varAtPoint point srcMod@(Src.Module name exports docs imports values unions alia
         values
 
 
-varFromExpr :: Src.Module -> [Src.Pattern] -> Src.Expr -> Maybe FoundVar
+varFromExpr :: Src.Module -> [Src.Pattern] -> Src.Expr -> Maybe Found
 varFromExpr srcMod@(Src.Module _ _ _ imports values unions aliases infixes effects) patterns expr@(A.At _ expr_) =
     case expr_ of
-        Src.Chr _ ->                    Nothing
-        Src.Str _ ->                    Nothing
-        Src.Int _ ->                    Nothing
-        Src.Float _ ->                  Nothing
-        Src.Var _ name ->               (find (findPatternIntroducing name) patterns & fmap FoundPattern)
-                                            <|> Just (FoundVar name)
-        Src.VarQual varType mod name -> Just (FoundVarQual mod name)
-        Src.List _ ->                   Nothing
-        Src.Op _ ->                     Nothing
-        Src.Negate _ ->                 Nothing
-        Src.Binops _ _ ->               Nothing
-        Src.Lambda _ _ ->               Nothing
-        Src.Call _ _ ->                 Nothing
-        Src.If _ _ ->                   Nothing
-        Src.Let _ _ ->                  Nothing
-        Src.Case _ _ ->                 Nothing
-        Src.Accessor _ ->               Nothing
-        Src.Access _ _ ->               Nothing
-        Src.Update _ _ ->               Nothing
-        Src.Record _ ->                 Nothing
-        Src.Unit  ->                    Nothing
-        Src.Tuple _ _ _ ->              Nothing
-        Src.Shader _ _ ->               Nothing
+        Src.Chr _ ->                     Nothing
+        Src.Str _ ->                     Nothing
+        Src.Int _ ->                     Nothing
+        Src.Float _ ->                   Nothing
+        Src.Var _ name ->                (find (findPatternIntroducing name) patterns & fmap FoundPattern)
+                                             <|> definitionNamed name srcMod
+                                             <|> (case potentialImportSourcesForName name imports of
+                                                     [import_] -> Just (FoundExternalOpts [import_] name)
+                                                     _ -> Nothing
+                                                 )
+        Src.VarQual varType qual name -> (case importsForQual qual imports of
+                                             [import_] -> Just (FoundExternalOpts [import_] name)
+                                             _ -> Nothing
+                                         )
+        Src.List _ ->                    Nothing
+        Src.Op _ ->                      Nothing
+        Src.Negate _ ->                  Nothing
+        Src.Binops _ _ ->                Nothing
+        Src.Lambda _ _ ->                Nothing
+        Src.Call _ _ ->                  Nothing
+        Src.If _ _ ->                    Nothing
+        Src.Let _ _ ->                   Nothing
+        Src.Case _ _ ->                  Nothing
+        Src.Accessor _ ->                Nothing
+        Src.Access _ _ ->                Nothing
+        Src.Update _ _ ->                Nothing
+        Src.Record _ ->                  Nothing
+        Src.Unit  ->                     Nothing
+        Src.Tuple _ _ _ ->               Nothing
+        Src.Shader _ _ ->                Nothing
 
 
-varFromPattern :: Src.Module -> [Src.Pattern] -> Src.Pattern -> Maybe FoundVar
-varFromPattern srcMod@(Src.Module _ _ _ _ _ _ _ _ _) patterns pattern@(A.At _ pattern_) =
+varFromPattern :: Src.Module -> [Src.Pattern] -> Src.Pattern -> Maybe Found
+varFromPattern srcMod@(Src.Module _ _ _ imports _ _ _ _ _) patterns pattern@(A.At _ pattern_) =
     case pattern_ of
         Src.PAnything ->               Nothing
-        Src.PVar name ->               find (findPatternIntroducing name) patterns & fmap FoundPattern
+        Src.PVar name ->               (find (findPatternIntroducing name) patterns & fmap FoundPattern)
+                                           <|> definitionNamed name srcMod
+                                           <|> (case potentialImportSourcesForName name imports of
+                                                   [import_] -> Just (FoundExternalOpts [import_] name)
+                                                   _ -> Nothing
+                                               )
         Src.PRecord _ ->               Nothing
         Src.PAlias _ _ ->              Nothing
         Src.PUnit ->                   Nothing
         Src.PTuple _ _ _ ->            Nothing
-        Src.PCtor _ name _ ->          Just (FoundVar name)
-        Src.PCtorQual _ qual name _ -> Just (FoundVarQual qual name)
+        Src.PCtor _ name _ ->          definitionNamed name srcMod
+                                           <|> (case potentialImportSourcesForName name imports of
+                                                   [import_] -> Just (FoundExternalOpts [import_] name)
+                                                   _ -> Nothing
+                                               )
+        Src.PCtorQual _ qual name _ -> (case importsForQual qual imports of
+                                           [import_] -> Just (FoundExternalOpts [import_] name)
+                                           _ -> Nothing
+                                       )
         Src.PList _ ->                 Nothing
         Src.PCons a b ->               Nothing
         Src.PChr _ ->                  Nothing
@@ -459,7 +478,7 @@ refineExprMatch point foundPatterns (A.At _ expr_) =
 
         Src.Case expr branches ->
             dive expr
-                & orFind
+                <|> find
                     (\(pattern, branchExpr) ->
                         (findPattern point pattern & fmap (\a -> (foundPatterns, Left a)))
                             <|> extendAndDive [pattern] branchExpr

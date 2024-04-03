@@ -398,121 +398,64 @@ findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
 
     case result of
       Right srcModule ->
-          (findType root point srcModule
-              >>= maybe (findVarAtPoint root point srcModule) (pure . Just)
-          )
-              & fmap
-                  (maybe
-                      (Ext.Dev.Find.Source.definitionAtPoint point srcModule
-                          & fmap (\a -> (path, regionFromFound a))
-                      )
-                      Just
-                  )
+          let
+              found =
+                  Ext.Dev.Find.Source.definitionAtPoint point srcModule
+          in
+          case found of
+            Nothing ->
+                pure Nothing
+
+            Just (Ext.Dev.Find.Source.FoundValue _ (Ann.At region _)) ->
+                pure (Just (path, region))
+
+            Just (Ext.Dev.Find.Source.FoundUnion _ (Ann.At region _)) ->
+                pure (Just (path, region))
+
+            Just (Ext.Dev.Find.Source.FoundAlias _ (Ann.At region _)) ->
+                pure (Just (path, region))
+
+            Just (Ext.Dev.Find.Source.FoundTVar (Ann.At region _)) ->
+                pure (Just (path, region))
+
+            Just (Ext.Dev.Find.Source.FoundCtor (Ann.At region _)) ->
+                pure (Just (path, region))
+
+            Just (Ext.Dev.Find.Source.FoundPattern (Ann.At region _)) ->
+                pure (Just (path, region))
+
+            Just (Ext.Dev.Find.Source.FoundExternalOpts imports name) -> do
+                fun <-
+                    Control.Monad.foldM
+                        (\acc mod ->
+                         case acc of
+                             Nothing ->
+                                 findExternal root mod name
+
+                             found ->
+                                 pure found
+                        )
+                        Nothing
+                        imports
+
+                case fun of
+                    Just (extPath, Ext.Dev.Find.Source.FoundValue _ (Ann.At region _)) ->
+                        pure (Just (extPath, region))
+
+                    Just (extPath, Ext.Dev.Find.Source.FoundUnion _ (Ann.At region _)) ->
+                        pure (Just (extPath, region))
+
+                    Just (extPath, Ext.Dev.Find.Source.FoundAlias _ (Ann.At region _)) ->
+                        pure (Just (extPath, region))
+
+                    Just (extPath, Ext.Dev.Find.Source.FoundCtor (Ann.At region _)) ->
+                        pure (Just (extPath, region))
+
+                    _ ->
+                        pure Nothing
 
       Left _  ->
           pure Nothing
-
-
-regionFromFound found =
-    case found of
-      (Ext.Dev.Find.Source.FoundValue _ (Ann.At region val)) ->
-          region
-
-      (Ext.Dev.Find.Source.FoundUnion _ (Ann.At region srcUnion)) ->
-          region
-
-      (Ext.Dev.Find.Source.FoundAlias _ (Ann.At region alias_)) ->
-          region
-
-      (Ext.Dev.Find.Source.FoundCtor (Ann.At region _)) ->
-          region
-
-
-findType :: FilePath -> Watchtower.Editor.PointLocation -> Src.Module -> IO (Maybe (FilePath, Ann.Region))
-findType root point@(Watchtower.Editor.PointLocation path _) srcModule = do
-    case Ext.Dev.Find.Source.typeAtPoint point srcModule of
-        Nothing ->
-            pure Nothing
-
-        Just tipe ->
-            case tipe of
-                Ext.Dev.Find.Source.FoundTVar (Ann.At region _) ->
-                    pure (Just ( path, region ))
-
-                Ext.Dev.Find.Source.FoundTType _ name -> do
-                    findVarNamed root path srcModule name
-
-
-                Ext.Dev.Find.Source.FoundTTypeQual region qual name -> do
-                    findQualVarNamed root srcModule qual name
-                        & fmap (fmap (Data.Bifunctor.second regionFromFound))
-
-
-findVarAtPoint :: FilePath -> Watchtower.Editor.PointLocation -> Src.Module -> IO (Maybe (FilePath, Ann.Region))
-findVarAtPoint root point@(Watchtower.Editor.PointLocation path _) srcModule = do
-    case Ext.Dev.Find.Source.varAtPoint point srcModule of
-        Nothing ->
-            pure Nothing
-
-        Just foundVar -> do
-            logWrite $ "found var: " ++ show foundVar 
-
-            case foundVar of
-                Ext.Dev.Find.Source.FoundVar name ->
-                    findVarNamed root path srcModule name
-
-                Ext.Dev.Find.Source.FoundVarQual qual name -> do
-                    findQualVarNamed root srcModule qual name
-                        & fmap (fmap (Data.Bifunctor.second regionFromFound))
-
-                Ext.Dev.Find.Source.FoundPattern (Ann.At region _)-> do
-                    pure (Just (path, region))
-
-
-findVarNamed root path srcModule name = do
-    let
-        found =
-            Ext.Dev.Find.Source.definitionNamed name srcModule
-
-    case found of
-        Nothing -> do
-            let
-                imports =
-                    Ext.Dev.Find.Source.potentialImportSourcesForName name (Src._imports srcModule)
-
-            Control.Monad.foldM
-               (\acc mod ->
-                 case acc of
-                     Nothing ->
-                         findExternal root mod name
-                         & fmap (fmap (Data.Bifunctor.second regionFromFound))
-
-                     found ->
-                         pure found
-               )
-               Nothing
-               imports
-
-        Just found_ ->
-          pure (Just (path, regionFromFound found_))
-
-
-findQualVarNamed root srcModule qual name = do
-    let
-        imports =
-            Ext.Dev.Find.Source.importsForQual qual (Src._imports srcModule)
-
-    Control.Monad.foldM
-       (\acc mod ->
-         case acc of
-             Nothing ->
-                 findExternal root mod name
-
-             found ->
-                 pure found
-       )
-       Nothing
-       imports
 
 
 findExternal :: FilePath -> Src.Import -> Name -> IO (Maybe (FilePath, Ext.Dev.Find.Source.Found))
