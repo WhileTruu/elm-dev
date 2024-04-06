@@ -6,6 +6,7 @@ module Ext.Dev.Find.Source
   , withCanonical, Def(..)
   , potentialImportSourcesForName
   , importsForQual
+  , references
   )
 where
 
@@ -22,7 +23,7 @@ import Data.Function ((&))
 import GHC.Base ((<|>))
 import qualified Data.Maybe as Maybe
 import Debug.Trace (traceShow)
-
+import qualified Elm.ModuleName as ModuleName
 
 data Found
     = FoundValue (Maybe Def) (A.Located Src.Value)
@@ -533,3 +534,238 @@ findPatternIntroducing name pattern@(A.At _ pattern_) =
 
     _ ->
         Nothing
+
+
+
+{-| References -}
+
+
+-- FIXME: currently only able to find externals
+references :: ModuleName.Raw -> Name -> Src.Module -> [A.Region]
+references moduleName name srcMod = do
+    let 
+        import_ = 
+            List.find 
+                (\(Src.Import (A.At _ importName) _ _) ->
+                    importName == moduleName
+                ) 
+                (Src._imports srcMod)
+    
+    import_ 
+        & fmap (\a -> referenceNamed a name srcMod)
+        & Maybe.fromMaybe []
+
+
+referenceNamed :: Src.Import -> Name -> Src.Module -> [A.Region]
+referenceNamed import_ name srcMod@(Src.Module _ _ _ imports values _ _ _ _) =
+    List.concatMap (namedInValue import_ name) values
+
+
+namedInValue :: Src.Import -> Name -> A.Located Src.Value -> [A.Region]
+namedInValue import_ name (A.At _ (Src.Value _ _ expr _)) =
+    namedInExpr import_ name [] expr
+
+
+namedInExpr :: Src.Import -> Name -> [A.Region] -> Src.Expr -> [A.Region]
+namedInExpr import_ name foundRegions (A.At region expr_) =
+    case expr_ of
+        Src.Chr _ ->
+            foundRegions
+
+        Src.Str _ ->
+            foundRegions
+
+        Src.Int _ ->
+            foundRegions
+
+        Src.Float _ ->
+            foundRegions
+
+        Src.Var _ varName ->
+            case Src._exposing import_ of
+                Src.Open ->
+                    if varName == name then
+                        region : foundRegions
+
+                    else
+                        foundRegions
+
+                Src.Explicit exposed ->
+                    if varName == name then
+                        List.foldl
+                            (\foundRegions exposedName ->
+                                case exposedName of
+                                    Src.Upper (A.At _ name_) _ ->
+                                        if name_ == name then
+                                            region : foundRegions
+
+                                        else
+                                            foundRegions
+
+                                    Src.Lower (A.At _ name_) ->
+                                        if name == name then
+                                            region : foundRegions
+
+                                        else
+                                            foundRegions
+
+                                    Src.Operator _ name_ ->
+                                         if name_ == name then
+                                            region : foundRegions
+
+                                        else
+                                            foundRegions
+                            )
+                            foundRegions
+                            exposed
+
+                    else
+                        foundRegions
+
+        Src.VarQual _ qual varName->
+            let
+                importName = 
+                    case Src._alias import_ of
+                        Just alias -> alias
+                        Nothing -> A.toValue (Src._import import_)
+            in
+            if importName == qual && varName == name then
+                region : foundRegions
+
+            else
+                foundRegions
+
+        Src.List exprs ->
+            List.foldl (namedInExpr import_ name) foundRegions exprs
+
+        Src.Op opName ->
+            case Src._exposing import_ of
+                Src.Open ->
+                    if opName == name then
+                        region : foundRegions
+
+                    else
+                        foundRegions
+
+                Src.Explicit exposed ->
+                    if opName == name then
+                        List.foldl
+                            (\foundRegions exposedName ->
+                                case exposedName of
+                                    Src.Upper (A.At _ name_) _ ->
+                                        if name_ == name then
+                                            region : foundRegions
+
+                                        else
+                                            foundRegions
+
+                                    Src.Lower (A.At _ name_) ->
+                                        if name == name then
+                                            region : foundRegions
+
+                                        else
+                                            foundRegions
+
+                                    Src.Operator _ name_ ->
+                                         if name_ == name then
+                                            region : foundRegions
+
+                                        else
+                                            foundRegions
+                            )
+                            foundRegions
+                            exposed
+
+                    else
+                        foundRegions
+
+        Src.Negate expr ->
+            namedInExpr import_ name foundRegions expr
+
+        Src.Binops exprsAndNames expr ->
+            List.foldl
+                (\foundRegions (expr_, _) ->
+                    namedInExpr import_ name foundRegions expr_
+                )
+                (namedInExpr import_ name foundRegions expr)
+                exprsAndNames
+
+        Src.Lambda patterns expr ->
+            namedInExpr import_ name foundRegions expr
+
+        Src.Call expr exprs ->
+            List.foldl 
+                (namedInExpr import_ name) 
+                (namedInExpr import_ name foundRegions expr) exprs
+
+        Src.If listTupleExprs expr ->
+            List.foldl
+                (\foundRegions (one, two) ->
+                    namedInExpr import_ name (namedInExpr import_ name foundRegions one) two
+                )
+                (namedInExpr import_ name foundRegions expr)
+                listTupleExprs
+
+        Src.Let defs expr ->
+            List.foldl
+                (\foundRegions (A.At _ def_) ->
+                    case def_ of
+                        Src.Define (A.At _ name_) _ expr_ _ ->
+                            if name_ == name then
+                                namedInExpr import_ name foundRegions expr_
+
+                            else
+                                foundRegions
+
+                        Src.Destruct pattern expr_ ->
+                            namedInExpr import_ name (namedInExpr import_ name foundRegions expr_) expr_
+                )
+                (namedInExpr import_ name foundRegions expr)
+                defs
+
+        Src.Case expr branches ->
+            List.foldl
+                (\foundRegions (pattern, branchExpr) ->
+                    namedInExpr import_ name (namedInExpr import_ name foundRegions branchExpr) expr
+                )
+                (namedInExpr import_ name foundRegions expr)
+                branches
+
+        Src.Accessor _ ->
+            foundRegions
+
+        Src.Access expr _ ->
+            namedInExpr import_ name foundRegions expr
+
+        Src.Update _ fields ->
+            List.foldl
+                (\foundRegions (_, fieldExpr) ->
+                    namedInExpr import_ name foundRegions fieldExpr
+                )
+                foundRegions
+                fields
+
+        Src.Record fields ->
+            List.foldl
+                (\foundRegions (_, fieldExpr) ->
+                    namedInExpr import_ name foundRegions fieldExpr
+                )
+                foundRegions
+                fields
+            
+
+        Src.Unit ->
+            foundRegions
+
+        Src.Tuple exprA exprB exprs ->
+            List.foldl 
+                (namedInExpr import_ name) 
+                foundRegions 
+                (exprA : exprB : exprs)
+
+        Src.Shader _ _ ->
+            foundRegions
+
+
+
+
