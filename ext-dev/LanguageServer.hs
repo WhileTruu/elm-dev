@@ -353,8 +353,6 @@ handleRequest state@(State mProjects) request =
 
       respond reqId
         (references
-          & List.filter (\(a, _) -> not (List.isInfixOf "Api" a))
-          & List.take 150
           & map
             (\((filePath, (Ann.Region (Ann.Position sr sc) (Ann.Position er ec)))) ->
               Aeson.object
