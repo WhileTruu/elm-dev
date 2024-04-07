@@ -1,0 +1,52 @@
+on:
+  push:
+    branches:
+      - lang-server
+
+name: Build macOS Apple Silicon
+
+jobs:
+  build:
+    name: Build macOS Apple Silicon
+    runs-on: [macOS, ARM64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v22
+
+      - name: get commit SHA
+        run: echo "SHA=$(git rev-parse --short "$GITHUB_SHA")" >> $GITHUB_ENV
+
+      - name: get date
+        run: echo "DATE=$(date "+%Y-%m-%d")" >> $GITHUB_ENV
+
+      - name: build folder name
+        env:
+            DATE: ${{ env.DATE }}
+            SHA: ${{ env.SHA }}
+        run: echo "BUILD_FOLDER_NAME=elm-dev-macos_apple_silicon-$DATE-$SHA" >> $GITHUB_ENV
+
+      - name: build release
+        run: nix develop -c stack install --local-bin-path ${{ env.BUILD_FOLDER_NAME }}
+
+      - name: package release
+        run: |
+          strip ${{ env.BUILD_FOLDER_NAME }}/elm-dev
+
+          tar -czf ${{ env.BUILD_FOLDER_NAME }}.tar.gz ${{ env.BUILD_FOLDER_NAME }}
+
+      - name: delete everything except the tar
+        run: ls | grep -v "elm-dev.*tar\.gz" | xargs rm -rf
+
+      - name: print short commit SHA
+        run: git rev-parse --short "$GITHUB_SHA"
+
+      - name: print date
+        run: date
+
+      - name: Upload artifact Actually uploading to github releases has to be done manually
+        uses: actions/upload-artifact@v4
+        with:
+           name: ${{ env.RELEASE_FOLDER_NAME }}.tar.gz
+           path: ${{ env.RELEASE_FOLDER_NAME }}.tar.gz
+           retention-days: 4
