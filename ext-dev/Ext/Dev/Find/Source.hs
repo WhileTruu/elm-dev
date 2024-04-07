@@ -138,6 +138,7 @@ definitionAtPoint :: Watchtower.Editor.PointLocation -> Src.Module -> Maybe Foun
 definitionAtPoint point srcMod@(Src.Module name exports docs imports values unions aliases infixes effects) =
     typeAtPoint point srcMod
         <|> varAtPoint point srcMod
+        <|> find (unionCtorAtPoint point) unions
         <|> find (atLocation point (FoundValue Nothing)) values
         <|> find (atLocation point (FoundUnion Nothing)) unions
         <|> find (atLocation point (FoundAlias Nothing)) aliases
@@ -165,6 +166,10 @@ find toResult =
 
         )
         Nothing
+
+unionCtorAtPoint :: Watchtower.Editor.PointLocation -> A.Located Src.Union -> Maybe Found
+unionCtorAtPoint point (A.At region (Src.Union _ _ ctors)) =
+    find (atLocation point FoundCtor) (map fst ctors)
 
 
 withinRegion :: A.Position -> A.Region -> Bool
