@@ -12,20 +12,18 @@
     in {
       devShell.aarch64-darwin = pkgs.mkShell {
         buildInputs = [
-          elmPackages.elm
-          elmPackages.elm-format
-          elmPackages.elm-test-rs
-          elmPackages.elm-review
+          # pkgs.elmPackages.elm
+          # pkgs.elmPackages.elm-format
+          # pkgs.elmPackages.elm-test-rs
+          # pkgs.elmPackages.elm-review
           # LTS Node
-          nodejs-18_x
+          # pkgs.nodejs-18_x
           # For the VSCode client
-          yarn
+          # pkgs.yarn
           # Needed for building GHC
-          llvmPackages_13.llvm
+          pkgs.llvmPackages_13.llvm
           # GHC
-          stack
-          # Other
-          git
+          pkgs.stack
         ];
       };
     };
