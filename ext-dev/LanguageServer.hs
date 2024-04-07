@@ -77,7 +77,7 @@ import qualified Data.Bifunctor
 import qualified Data.Set as Set
 import qualified Elm.Details
 import qualified Data.Map as Map
-
+import Debug.Trace (traceShow)
 
 serve :: IO ()
 serve = do
@@ -641,8 +641,8 @@ findExternal2 root (Src.Import (Ann.At _ mod) _ _) name = do
 references :: FilePath -> Watchtower.Editor.PointLocation -> IO [(FilePath, Ann.Region)]
 references root point = do
     definition <- findDefinition2 root point
-    
-    maybe 
+
+    maybe
         (pure [])
         (\def -> do
             let
@@ -663,7 +663,7 @@ references root point = do
             project <- Ext.CompileProxy.loadProject root
 
             let importers = Ext.Dev.Project.importersOf project mod
-             
+
             Control.Monad.foldM
                 (\acc modName -> do
                     case Ext.Dev.Project.lookupModulePath project modName of
@@ -672,7 +672,7 @@ references root point = do
                         Just path -> do
                             Control.Exception.catch
                                 (Ext.CompileProxy.parse root path
-                                  & fmap 
+                                  & fmap
                                       (\result ->
                                           case result of
                                               Left _ ->

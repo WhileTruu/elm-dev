@@ -564,9 +564,12 @@ referenceNamed import_ name srcMod@(Src.Module _ _ _ imports values _ _ _ _) =
 
 
 namedInValue :: Src.Import -> Name -> A.Located Src.Value -> [A.Region]
-namedInValue import_ name (A.At _ (Src.Value _ _ expr _)) =
+namedInValue import_ name (A.At _ (Src.Value _ _ expr type_)) =
     namedInExpr import_ name [] expr
-
+        ++ (case type_ of
+            Just tipe -> namedInType import_ name [] tipe
+            Nothing -> []
+           )
 
 namedInExpr :: Src.Import -> Name -> [A.Region] -> Src.Expr -> [A.Region]
 namedInExpr import_ name foundRegions (A.At region expr_) =
@@ -698,8 +701,12 @@ namedInExpr import_ name foundRegions (A.At region expr_) =
             List.foldl
                 (\foundRegions (A.At _ def_) ->
                     case def_ of
-                        Src.Define (A.At _ name_) _ expr_ _ ->
+                        Src.Define (A.At _ name_) _ expr_ type_ ->
                             namedInExpr import_ name foundRegions expr_
+                                ++ (case type_ of
+                                        Just tipe -> namedInType import_ name [] tipe
+                                        Nothing -> []
+                                   )
 
                         Src.Destruct pattern expr_ ->
                             namedInExpr import_ name foundRegions expr_
@@ -751,14 +758,83 @@ namedInExpr import_ name foundRegions (A.At region expr_) =
             foundRegions
 
 
+namedInType :: Src.Import -> Name -> [A.Region] -> Src.Type -> [A.Region]
+namedInType import_ name foundRegions (A.At region type_) =
+    case type_ of
+        Src.TLambda arg ret -> localNamedInType name (localNamedInType name foundRegions arg) ret
+        Src.TVar varName -> 
+            if name == varName then 
+                region : foundRegions
+            else
+                foundRegions
+
+        Src.TType _ typeName tvars -> 
+            case Src._exposing import_ of
+                Src.Open ->
+                    if typeName == name then
+                        region : foundRegions
+
+                    else
+                        foundRegions
+
+                Src.Explicit exposed ->
+                    if typeName == name then
+                        List.foldl
+                            (\foundRegions exposedName ->
+                                case exposedName of
+                                    Src.Upper (A.At _ name_) _ ->
+                                        if name_ == name then
+                                            region : foundRegions
+
+                                        else
+                                            foundRegions
+
+                                    Src.Lower (A.At _ name_) ->
+                                        if name == name then
+                                            region : foundRegions
+
+                                        else
+                                            foundRegions
+
+                                    Src.Operator _ _ ->
+                                        foundRegions
+                            )
+                            foundRegions
+                            exposed
+
+                    else
+                        foundRegions
+
+        Src.TTypeQual _ qual varName tvars -> 
+            let
+                importName =
+                    case Src._alias import_ of
+                        Just alias -> alias
+                        Nothing -> A.toValue (Src._import import_)
+            in
+            if importName == qual && varName == name then
+                region : List.foldl (localNamedInType name) foundRegions tvars
+
+            else
+                List.foldl (localNamedInType name) foundRegions tvars
+
+        Src.TRecord fields extRecord -> List.foldl (localNamedInType name) foundRegions (map snd fields)
+        Src.TUnit -> foundRegions
+        Src.TTuple a b rest -> List.foldl (localNamedInType name) (localNamedInType name (localNamedInType name foundRegions b) a) rest
+
+
 localReferenceNamed :: Name -> Src.Module -> [A.Region]
 localReferenceNamed name srcMod@(Src.Module _ _ _ imports values _ _ _ _) =
     List.concatMap (localNamedInValue name) values
 
 
 localNamedInValue :: Name -> A.Located Src.Value -> [A.Region]
-localNamedInValue name (A.At _ (Src.Value _ _ expr _)) =
+localNamedInValue name (A.At _ (Src.Value _ _ expr type_)) =
     localNamedInExpr name [] expr
+        ++ (case type_ of
+                Just tipe -> localNamedInType name [] tipe
+                Nothing -> []
+           )
 
 
 localNamedInExpr :: Name -> [A.Region] -> Src.Expr -> [A.Region]
@@ -799,8 +875,13 @@ localNamedInExpr name foundRegions (A.At region expr_) =
             List.foldl
                 (\foundRegions (A.At _ def_) ->
                     case def_ of
-                        Src.Define (A.At _ name_) _ expr_ _ ->
+                        Src.Define (A.At _ name_) _ expr_ type_ ->
                             localNamedInExpr name foundRegions expr_
+                                ++ (case type_ of
+                                        Just tipe -> localNamedInType name [] tipe
+                                        Nothing -> []
+                                   )
+
 
                         Src.Destruct pattern expr_ ->
                             localNamedInExpr name foundRegions expr_
@@ -839,4 +920,25 @@ localNamedInExpr name foundRegions (A.At region expr_) =
                 (exprA : exprB : exprs)
         Src.Shader _ _ -> foundRegions
 
+
+localNamedInType :: Name -> [A.Region] -> Src.Type -> [A.Region]
+localNamedInType name foundRegions (A.At region type_) =
+    case type_ of
+        Src.TLambda arg ret -> localNamedInType name (localNamedInType name foundRegions arg) ret
+        Src.TVar varName -> 
+            if name == varName then 
+                region : foundRegions
+            else
+                foundRegions
+
+        Src.TType _ typeName tvars -> 
+            if name == typeName then 
+                region : List.foldl (localNamedInType name) foundRegions tvars
+            else
+                List.foldl (localNamedInType name) foundRegions tvars
+
+        Src.TTypeQual _ _ _ tvars -> List.foldl (localNamedInType name) foundRegions tvars
+        Src.TRecord fields extRecord -> List.foldl (localNamedInType name) foundRegions (map snd fields)
+        Src.TUnit -> foundRegions
+        Src.TTuple a b rest -> List.foldl (localNamedInType name) (localNamedInType name (localNamedInType name foundRegions b) a) rest
 
