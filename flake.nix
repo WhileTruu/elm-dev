@@ -24,6 +24,8 @@
           pkgs.llvmPackages_13.llvm
           # GHC
           pkgs.stack
+          pkgs.darwin.apple_sdk.frameworks.Cocoa
+          pkgs.darwin.apple_sdk.frameworks.CoreServices
         ];
       };
     };
