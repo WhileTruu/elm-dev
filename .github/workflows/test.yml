@@ -8,7 +8,7 @@ name: Build macOS Apple Silicon
 jobs:
   build:
     name: Build macOS Apple Silicon
-    runs-on: [macOS, ARM64]
+    runs-on: [macos-14]
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
