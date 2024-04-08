@@ -3,6 +3,10 @@ system-ghc: false
 ghc-options:
   "$locals": -Wincomplete-patterns -lstdc++
   "$targets": -lstdc++
+when:
+  - condition: os(darwin)
+    ghc-options:
+    - -optP-Wno-nonportable-include-path
 allow-newer: true
 extra-deps:
 - timeout-0.1.1
