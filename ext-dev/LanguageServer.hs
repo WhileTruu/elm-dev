@@ -540,6 +540,7 @@ data Found
     | FoundUnion ModuleName.Raw (Ann.Located Src.Union)
     | FoundAlias ModuleName.Raw (Ann.Located Src.Alias)
     | FoundCtor ModuleName.Raw (Ann.Located Name)
+    | FoundModule ModuleName.Raw
 
 
 findDefinition2 :: FilePath -> Watchtower.Editor.PointLocation -> IO (Maybe Found)
@@ -591,6 +592,9 @@ findDefinition2 root point@(Watchtower.Editor.PointLocation path _) = do
                     )
                     Nothing
                     imports
+
+            Just (Ext.Dev.Find.Source.FoundImport import_) -> do
+                pure (Just (FoundModule (Src.getImportName import_)))
 
       Left _  ->
           pure Nothing
@@ -667,24 +671,41 @@ references :: FilePath -> Watchtower.Editor.PointLocation -> IO [(FilePath, Ann.
 references root point = do
     definition <- findDefinition2 root point
 
-    maybe
-        (pure [])
-        (\def -> do
-            let
-                (mod, defRegion, defName) =
-                    case def of
-                        FoundValue mod (Ann.At region (Src.Value name _ _ _)) ->
-                            (mod, region, Ann.toValue name)
+    maybe (pure []) referencesForDef definition
 
-                        FoundUnion mod (Ann.At region (Src.Union name _ _)) ->
-                            (mod, region, Ann.toValue name)
+    where
+        referencesForDef def = do
+            case def of
+                FoundValue mod (Ann.At region (Src.Value name _ _ _)) ->
+                    referencesForNamedIThink mod region (Ann.toValue name)
 
-                        FoundAlias mod (Ann.At region (Src.Alias name _ _)) ->
-                            (mod, region, Ann.toValue name)
+                FoundUnion mod (Ann.At region (Src.Union name _ _)) ->
+                    referencesForNamedIThink mod region (Ann.toValue name)
 
-                        FoundCtor mod (Ann.At region name) ->
-                            (mod, region, name)
+                FoundAlias mod (Ann.At region (Src.Alias name _ _)) ->
+                    referencesForNamedIThink mod region (Ann.toValue name)
 
+                FoundCtor mod (Ann.At region name) ->
+                    referencesForNamedIThink mod region name
+
+                FoundModule mod -> do
+                    project <- Ext.CompileProxy.loadProject root
+
+                    let importers = Ext.Dev.Project.importersOf project mod
+
+                    Control.Monad.foldM
+                        (\acc modName -> do
+                            case Ext.Dev.Project.lookupModulePath project modName of
+                                Nothing ->
+                                    pure acc
+
+                                Just path -> do
+                                    pure (acc ++ [ (path, Ann.one) ])
+                        )
+                        []
+                        (mod : Set.toList importers)
+
+        referencesForNamedIThink mod defRegion defName = do
             project <- Ext.CompileProxy.loadProject root
 
             let importers = Ext.Dev.Project.importersOf project mod
@@ -721,8 +742,6 @@ references root point = do
                 )
                 []
                 (mod : Set.toList importers)
-        )
-        definition
 
 
 sendCreateWorkDoneProgress :: String -> IO ()
