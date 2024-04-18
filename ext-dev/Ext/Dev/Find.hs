@@ -507,7 +507,7 @@ varQualToFound imports mod name =
     imports
         & List.filter
             (\(Src.Import (A.At _ importName) alias _) ->
-                importName == mod || alias == Just mod
+                importName == mod || fmap A.toValue alias == Just mod
             )
         & map
             (\(Src.Import (A.At _ importName) _ _) ->

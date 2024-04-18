@@ -460,6 +460,31 @@ findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
 
                     _ ->
                         pure Nothing
+            Just (Ext.Dev.Find.Source.FoundImport (Src.Import (Ann.At _ mod) _ _)) -> do
+                  details <- Ext.CompileProxy.loadProject root
+
+                  case Ext.Dev.Project.lookupModulePath details mod of
+                      Nothing -> do
+                          case Ext.Dev.Project.lookupPkgName details mod of
+                              Nothing ->
+                                  pure Nothing
+
+                              Just pkgName -> do
+                                  maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
+
+                                  case maybeCurrentVersion of
+                                      Nothing ->
+                                          pure Nothing
+
+                                      Just version -> do
+                                          packageCache <- Stuff.getPackageCache
+                                          let home = Stuff.package packageCache pkgName version
+                                          let path = home Path.</> "src" Path.</> ModuleName.toFilePath mod Path.<.>"elm"
+
+                                          pure (Just (path, Ann.one))
+
+                      Just path ->
+                          pure (Just (path, Ann.one))
 
       Left _  ->
           pure Nothing

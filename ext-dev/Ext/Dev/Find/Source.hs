@@ -34,6 +34,7 @@ data Found
     | FoundPattern Src.Pattern
     | FoundDef Src.Def
     | FoundExternalOpts [Src.Import] Name
+    | FoundImport Src.Import
     deriving (Show)
 
 
@@ -68,6 +69,9 @@ withCanonical (Can.Module name exports docs decls unions aliases binops effects)
             found
 
         FoundExternalOpts _ _ ->
+            found
+
+        FoundImport _ ->
             found
 
 
@@ -139,6 +143,7 @@ definitionAtPoint point srcMod@(Src.Module name exports docs imports values unio
     typeAtPoint point srcMod
         <|> varAtPoint point srcMod
         <|> find (unionCtorAtPoint point) unions
+        <|> find (importAtPoint point) imports
         <|> find (atLocation point (FoundValue Nothing)) values
         <|> find (atLocation point (FoundUnion Nothing)) unions
         <|> find (atLocation point (FoundAlias Nothing)) aliases
@@ -166,6 +171,16 @@ find toResult =
 
         )
         Nothing
+
+
+importAtPoint :: Watchtower.Editor.PointLocation -> Src.Import -> Maybe Found
+importAtPoint (Watchtower.Editor.PointLocation _ point) import_@(Src.Import (A.At region _) alias _) =
+    if withinRegion point region || maybe False (withinRegion point . A.toRegion) alias then
+        Just (FoundImport import_)
+
+    else
+        Nothing
+
 
 unionCtorAtPoint :: Watchtower.Editor.PointLocation -> A.Located Src.Union -> Maybe Found
 unionCtorAtPoint point (A.At region (Src.Union _ _ ctors)) =
@@ -285,7 +300,7 @@ importsForQual :: Name -> [Src.Import] -> [Src.Import]
 importsForQual qual =
     List.filter
         (\(Src.Import (A.At _ importName) alias _) ->
-            importName == qual || alias == Just qual
+            importName == qual || (fmap (\(A.At _ aliasName) -> aliasName) alias) == Just qual
         )
 
 
@@ -632,7 +647,7 @@ namedInExpr import_ name foundRegions (A.At region expr_) =
             let
                 importName =
                     case Src._alias import_ of
-                        Just alias -> alias
+                        Just alias -> A.toValue alias
                         Nothing -> A.toValue (Src._import import_)
             in
             if importName == qual && varName == name then
@@ -814,7 +829,7 @@ namedInType import_ name foundRegions (A.At region type_) =
             let
                 importName =
                     case Src._alias import_ of
-                        Just alias -> alias
+                        Just alias -> A.toValue alias
                         Nothing -> A.toValue (Src._import import_)
             in
             if importName == qual && varName == name then
