@@ -289,7 +289,7 @@ addImport pkg foreigns vtable (Src.Import (A.At _ importName) maybeAlias exposin
   else
     let
       home = ModuleName.Canonical (Map.findWithDefault pkg importName foreigns) importName
-      prefix = toPrefix importName maybeAlias
+      prefix = toPrefix importName (fmap (\(A.At _ aliasName) -> aliasName) maybeAlias)
       add table name =
         Map.insert (Name.sepBy 0x5F {-_-} prefix name) (ElmVar home name) table
     in

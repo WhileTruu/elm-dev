@@ -101,7 +101,7 @@ addImport :: Map.Map ModuleName.Raw I.Interface -> State -> Src.Import -> Result
 addImport ifaces (State vs ts cs bs qvs qts qcs) (Src.Import (A.At _ name) maybeAlias exposing) =
   let
     (I.Interface pkg defs unions aliases binops) = ifaces ! name
-    !prefix = maybe name id maybeAlias
+    !prefix = maybe name id (fmap (\(A.At _ aliasName) -> aliasName) maybeAlias)
     !home = ModuleName.Canonical pkg name
 
     !rawTypeInfo =

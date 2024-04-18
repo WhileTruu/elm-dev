@@ -170,7 +170,7 @@ encodeImport localizer interfaces (Src.Import (A.At _ name) maybeAlias exposing)
                     , "alias"     ==> 
                         case maybeAlias of
                             Nothing -> Json.Encode.null
-                            Just alias_ ->
+                            Just (A.At _ alias_) ->
                                 Json.Encode.name alias_
                     , "values" ==>
                         (Json.Encode.object

@@ -401,7 +401,7 @@ chompAs :: A.Located Name.Name -> Parser E.Module Src.Import
 chompAs name =
   do  Keyword.as_ E.ImportAs
       Space.chompAndCheckIndent E.ModuleSpace E.ImportIndentAlias
-      alias <- Var.upper E.ImportAlias
+      alias <- addLocation (Var.upper E.ImportAlias)
       end <- getPosition
       Space.chomp E.ModuleSpace
       oneOf E.ImportEnd
@@ -412,7 +412,7 @@ chompAs name =
         ]
 
 
-chompExposing :: A.Located Name.Name -> Maybe Name.Name -> Parser E.Module Src.Import
+chompExposing :: A.Located Name.Name -> Maybe (A.Located Name.Name) -> Parser E.Module Src.Import
 chompExposing name maybeAlias =
   do  Keyword.exposing_ E.ImportExposing
       Space.chompAndCheckIndent E.ModuleSpace E.ImportIndentExposingList
