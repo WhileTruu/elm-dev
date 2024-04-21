@@ -18,12 +18,14 @@ import qualified Data.List as List
 
 
 import Data.Name (Name)
+import qualified Data.Name as Name
 import qualified Data.Map as Map
 import Data.Function ((&))
 import GHC.Base ((<|>))
 import qualified Data.Maybe as Maybe
 import Debug.Trace (traceShow)
 import qualified Elm.ModuleName as ModuleName
+import Data.Word (Word16)
 
 data Found
     = FoundValue (Maybe Def) (A.Located Src.Value)
@@ -144,9 +146,48 @@ definitionAtPoint point srcMod@(Src.Module name exports docs imports values unio
         <|> varAtPoint point srcMod
         <|> find (unionCtorAtPoint point) unions
         <|> find (importAtPoint point) imports
-        <|> find (atLocation point (FoundValue Nothing)) values
-        <|> find (atLocation point (FoundUnion Nothing)) unions
-        <|> find (atLocation point (FoundAlias Nothing)) aliases
+        <|> find (fmap (FoundValue Nothing) . valueNameAtPoint point) values
+        <|> find (fmap (FoundUnion Nothing) . unionNameAtPoint point) unions
+        <|> find (fmap (FoundAlias Nothing) . aliasNameAtPoint point) aliases
+
+
+valueNameAtPoint :: Watchtower.Editor.PointLocation -> A.Located Src.Value -> Maybe (A.Located Src.Value)
+valueNameAtPoint (Watchtower.Editor.PointLocation _ point) value =
+    let
+        (A.At (A.Region (A.Position sx sy) _) (Src.Value name _ _ typeAnn)) =
+            value
+
+        valNameLen =
+            fromIntegral (length (Name.toChars (A.toValue name))) :: Word16
+    in
+    if
+        withinRegion point (A.toRegion name)
+            || (Maybe.isJust typeAnn
+                    && withinRegion point (A.Region (A.Position sx 0) (A.Position sx valNameLen))
+               )
+    then
+        Just value
+
+    else
+        Nothing
+
+
+unionNameAtPoint :: Watchtower.Editor.PointLocation -> A.Located Src.Union -> Maybe (A.Located Src.Union)
+unionNameAtPoint (Watchtower.Editor.PointLocation _ point) union@(A.At _ (Src.Union name _ _)) =
+    if withinRegion point (A.toRegion name) then
+        Just union
+
+    else
+        Nothing
+
+
+aliasNameAtPoint :: Watchtower.Editor.PointLocation -> A.Located Src.Alias -> Maybe (A.Located Src.Alias)
+aliasNameAtPoint (Watchtower.Editor.PointLocation _ point) alias@(A.At _ (Src.Alias name _ _)) =
+    if withinRegion point (A.toRegion name) then
+        Just alias
+
+    else
+        Nothing
 
 
 atLocation :: Watchtower.Editor.PointLocation -> (A.Located a -> Found) -> A.Located a -> Maybe Found

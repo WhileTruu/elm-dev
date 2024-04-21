@@ -407,14 +407,14 @@ findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
             Nothing ->
                 pure Nothing
 
-            Just (Ext.Dev.Find.Source.FoundValue _ (Ann.At region _)) ->
-                pure (Just (path, region))
+            Just (Ext.Dev.Find.Source.FoundValue _ (Ann.At _ (Src.Value name _ _ _))) ->
+                pure (Just (path, Ann.toRegion name))
 
-            Just (Ext.Dev.Find.Source.FoundUnion _ (Ann.At region _)) ->
-                pure (Just (path, region))
+            Just (Ext.Dev.Find.Source.FoundUnion _ (Ann.At region (Src.Union name _ _ ))) ->
+                pure (Just (path, Ann.toRegion name))
 
-            Just (Ext.Dev.Find.Source.FoundAlias _ (Ann.At region _)) ->
-                pure (Just (path, region))
+            Just (Ext.Dev.Find.Source.FoundAlias _ (Ann.At region (Src.Alias name _ _))) ->
+                pure (Just (path, Ann.toRegion name))
 
             Just (Ext.Dev.Find.Source.FoundTVar (Ann.At region _)) ->
                 pure (Just (path, region))
