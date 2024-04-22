@@ -81,7 +81,6 @@ import Debug.Trace (traceShow)
 
 serve :: IO ()
 serve = do
-  logWrite "Starting server..."
   state <- State <$> STM.newTVarIO []
 
   loop state
@@ -90,15 +89,10 @@ serve = do
     loop state = do
       contentLen <- readHeader
 
-      logWrite $ "Content-Length: " ++ show contentLen
-
       body <- B.hGet IO.stdin (contentLen + 2)
-
-      logWrite $ "Body: " ++ B.unpack body
 
       case Aeson.eitherDecodeStrict body of
         Left err -> do
-          logWrite $ "Error: " ++ err
           loop state
 
         Right request -> do
@@ -289,12 +283,10 @@ handleRequest state@(State mProjects) request =
       sendProgressEnd "initialization-progress"
 
     Shutdown {reqId = idValue} -> do
-      logWrite "Shut down..."
       respond idValue Aeson.Null
       System.Exit.exitSuccess
 
     Exit -> do
-      logWrite "Exiting program..."
       System.Exit.exitSuccess
 
     Initialized -> do
@@ -400,8 +392,6 @@ findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
           let
               found =
                   Ext.Dev.Find.Source.definitionAtPoint point srcModule
-
-          logWrite $ "Found: " ++ show found
 
           case found of
             Nothing ->
@@ -552,8 +542,6 @@ findDefinition2 root point@(Watchtower.Editor.PointLocation path _) = do
           let
               found =
                   Ext.Dev.Find.Source.definitionAtPoint point srcModule
-
-          logWrite $ "Found: " ++ show found
 
           case found of
             Nothing ->
@@ -969,7 +957,6 @@ respond idValue value =
       , "result" Aeson..= value
       ]
    in do
-   logWrite $ show (B.pack header `B.append` content)
    B.hPutStr IO.stdout (B.pack header `B.append` content)
    IO.hFlush IO.stdout
 
@@ -983,7 +970,6 @@ sendNotification method value =
       , "params" Aeson..= value
       ]
    in do
-   logWrite $ show (B.pack header `B.append` content)
    B.hPutStr IO.stdout (B.pack header `B.append` content)
    IO.hFlush IO.stdout
 
@@ -1000,7 +986,6 @@ respondErr idValue message =
         ]
       ]
    in do
-   logWrite $ show (B.pack header `B.append` content)
    B.hPutStr IO.stdout (B.pack header `B.append` content)
    IO.hFlush IO.stdout
 
@@ -1027,14 +1012,4 @@ messageHeaderParser = messageHeaderParserHelp 0
     parseAnyChar i = do
       _ <- Parsec.anyChar
       messageHeaderParserHelp (i + 1)
-
-
-
--- UTILS
-
-
-logWrite :: String -> IO ()
-logWrite str = do
-  appendFile "/tmp/lsp.log" (str ++ "\n\n")
-
 
