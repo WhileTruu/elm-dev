@@ -146,6 +146,7 @@ definitionAtPoint point srcMod@(Src.Module name exports docs imports values unio
         <|> varAtPoint point srcMod
         <|> find (unionCtorAtPoint point) unions
         <|> find (importAtPoint point) imports
+        <|> exportAtPoint point srcMod exports
         <|> find (fmap (FoundValue Nothing) . valueNameAtPoint point) values
         <|> find (fmap (FoundUnion Nothing) . unionNameAtPoint point) unions
         <|> find (fmap (FoundAlias Nothing) . aliasNameAtPoint point) aliases
@@ -221,6 +222,42 @@ importAtPoint (Watchtower.Editor.PointLocation _ point) import_@(Src.Import (A.A
 
     else
         Nothing
+
+
+exportAtPoint :: Watchtower.Editor.PointLocation -> Src.Module -> A.Located Src.Exposing -> Maybe Found
+exportAtPoint (Watchtower.Editor.PointLocation _ point) srcMod (A.At region exposing) =
+    if withinRegion point region then
+        case exposing of
+            Src.Open ->
+                Nothing
+
+            Src.Explicit exposed ->
+                find (exposedAtPoint point srcMod) exposed
+
+    else
+        Nothing
+
+
+exposedAtPoint :: A.Position -> Src.Module -> Src.Exposed -> Maybe Found
+exposedAtPoint point srcMod@(Src.Module _ _ _ _ values unions aliases _ _ ) exposed =
+    case exposed of
+        Src.Lower (A.At region name) ->
+            if withinRegion point region then
+                find (withName name toValueName (FoundValue Nothing)) values
+
+            else
+                Nothing
+
+        Src.Upper (A.At region name) _ ->
+            if withinRegion point region then
+                find (withName name toUnionName (FoundUnion Nothing)) unions
+                    <|> find (withName name toAliasName (FoundAlias Nothing)) aliases
+
+            else
+                Nothing
+
+        Src.Operator region name ->
+            Nothing
 
 
 unionCtorAtPoint :: Watchtower.Editor.PointLocation -> A.Located Src.Union -> Maybe Found
