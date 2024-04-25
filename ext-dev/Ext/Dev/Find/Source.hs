@@ -638,7 +638,6 @@ findPatternIntroducing name pattern@(A.At _ pattern_) =
 {-| References -}
 
 
--- FIXME: currently only able to find externals
 references :: ModuleName.Raw -> Name -> Src.Module -> [A.Region]
 references moduleName name srcMod = do
     if moduleName == Src.getName srcMod then
@@ -659,6 +658,7 @@ references moduleName name srcMod = do
 referenceNamed :: Src.Import -> Name -> Src.Module -> [A.Region]
 referenceNamed import_ name srcMod@(Src.Module _ _ _ imports values _ _ _ _) =
     List.concatMap (namedInValue import_ name) values
+        -- FIXME Find references in unions and aliases (binops?)
 
 
 namedInValue :: Src.Import -> Name -> A.Located Src.Value -> [A.Region]
@@ -859,7 +859,7 @@ namedInExpr import_ name foundRegions (A.At region expr_) =
 namedInType :: Src.Import -> Name -> [A.Region] -> Src.Type -> [A.Region]
 namedInType import_ name foundRegions (A.At region type_) =
     case type_ of
-        Src.TLambda arg ret -> localNamedInType name (localNamedInType name foundRegions arg) ret
+        Src.TLambda arg ret -> namedInType import_ name (namedInType import_ name foundRegions arg) ret
         Src.TVar varName -> 
             if name == varName then 
                 region : foundRegions
@@ -911,14 +911,14 @@ namedInType import_ name foundRegions (A.At region type_) =
                         Nothing -> A.toValue (Src._import import_)
             in
             if importName == qual && varName == name then
-                region : List.foldl (localNamedInType name) foundRegions tvars
+                region : List.foldl (namedInType import_ name) foundRegions tvars
 
             else
-                List.foldl (localNamedInType name) foundRegions tvars
+                List.foldl (namedInType import_ name) foundRegions tvars
 
-        Src.TRecord fields extRecord -> List.foldl (localNamedInType name) foundRegions (map snd fields)
+        Src.TRecord fields extRecord -> List.foldl (namedInType import_ name) foundRegions (map snd fields)
         Src.TUnit -> foundRegions
-        Src.TTuple a b rest -> List.foldl (localNamedInType name) (localNamedInType name (localNamedInType name foundRegions b) a) rest
+        Src.TTuple a b rest -> List.foldl (namedInType import_ name) (namedInType import_ name (namedInType import_ name foundRegions b) a) rest
 
 
 localReferenceNamed :: Name -> Src.Module -> [A.Region]
