@@ -36,6 +36,9 @@ import qualified Reporting.Exit as Exit
 import qualified System.Directory as Dir
 import System.FilePath as FP ((</>))
 import Prelude hiding (lookup)
+import qualified Data.NonEmptyList as NE
+
+import StandaloneInstances
 
 defaultImports :: Set.Set ModuleName.Raw
 defaultImports =
@@ -123,21 +126,28 @@ Entrypoints:
 data Project = Project
   { _root :: FilePath,
     _projectRoot :: FilePath,
-    _entrypoints :: [FilePath]
+    _entrypoints :: [FilePath],
+    _sourceDirs :: [Elm.Outline.SrcDir]
   }
   deriving (Show)
 
 equal :: Project -> Project -> Bool
-equal (Project root1 _ _) (Project root2 _ _) =
+equal (Project root1 _ _ _) (Project root2 _ _ _) =
   root1 == root2
 
 getRoot :: Project -> FilePath
-getRoot (Project root _ _) =
+getRoot (Project root _ _ _) =
   root
 
 contains :: FilePath -> Project -> Bool
-contains path (Project root _ _) =
-  root `List.isPrefixOf` path
+contains path (Project root _ _ sourceDirs) =
+  case sourceDirs of
+    [] ->
+      root `List.isPrefixOf` path
+    _ ->
+      any 
+        (\dir -> List.isPrefixOf (Elm.Outline.toAbsolute root dir) path) 
+        sourceDirs
 
 {- Recursively find files named elm.json.
 
@@ -209,13 +219,13 @@ createProject :: FilePath -> FilePath -> IO Project
 createProject projectRoot elmJsonRoot = do
   outlineResult <- Elm.Outline.read elmJsonRoot
   case outlineResult of
-    Right (Elm.Outline.App _) -> do
+    Right (Elm.Outline.App outline) -> do
       maybeElmMain <- findFirstFileNamed "Main.elm" elmJsonRoot
       case maybeElmMain of
         Nothing ->
-          pure (Project elmJsonRoot projectRoot [])
+          pure (Project elmJsonRoot projectRoot [] (NE.toList (Elm.Outline._app_source_dirs outline)))
         Just main -> do
-          pure (Project elmJsonRoot projectRoot [main])
+          pure (Project elmJsonRoot projectRoot [main] (NE.toList (Elm.Outline._app_source_dirs outline)))
     Right (Elm.Outline.Pkg pkg) -> do
       case Elm.Outline._pkg_exposed pkg of
         Elm.Outline.ExposedList rawModNameList ->
@@ -224,6 +234,7 @@ createProject projectRoot elmJsonRoot = do
                 elmJsonRoot
                 projectRoot
                 (rawModuleNameToPackagePath elmJsonRoot <$> rawModNameList)
+                []
             )
         Elm.Outline.ExposedDict dict ->
           pure
@@ -231,6 +242,7 @@ createProject projectRoot elmJsonRoot = do
                 elmJsonRoot
                 projectRoot
                 (concatMap (\(_, modList) -> rawModuleNameToPackagePath elmJsonRoot <$> modList) dict)
+                []
             )
     Left err -> do
       _ <-
@@ -238,7 +250,7 @@ createProject projectRoot elmJsonRoot = do
           Ext.Log.Live
           ( "Elm Outline Error: " <> Exit.toString (Exit.toOutlineReport err)
           )
-      pure (Project elmJsonRoot projectRoot [])
+      pure (Project elmJsonRoot projectRoot [] [])
 
 rawModuleNameToPackagePath :: FilePath -> ModuleName.Raw -> FilePath
 rawModuleNameToPackagePath root modul =
@@ -274,6 +286,8 @@ decodeProject =
     <$> Json.Decode.field "root" decodeFilePath
     <*> Json.Decode.field "projectRoot" decodeFilePath
     <*> Json.Decode.field "entrypoints" (Json.Decode.list decodeFilePath)
+    -- FIXME:
+    <*> Json.Decode.field "sourceDirs" (pure [])
 
 decodeFilePath :: Json.Decode.Decoder x FilePath
 decodeFilePath =
@@ -289,12 +303,13 @@ decodeFilePath =
     <$> (Json.String.toChars <$> Json.Decode.string)
 
 encodeProjectJson :: Project -> Json.Encode.Value
-encodeProjectJson (Project elmJson projectRoot entrypoints) =
+encodeProjectJson (Project elmJson projectRoot entrypoints sourceDirs) =
   Json.Encode.object
     [ "root" ==> Json.Encode.string (Json.String.fromChars elmJson),
       "projectRoot" ==> Json.Encode.string (Json.String.fromChars projectRoot),
       "entrypoints"
         ==> Json.Encode.list
           (Json.Encode.string . Json.String.fromChars)
-          entrypoints
+          entrypoints,
+      "sourceDirs" ==> Json.Encode.list Elm.Outline.encodeSrcDir sourceDirs
     ]

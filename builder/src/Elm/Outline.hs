@@ -9,7 +9,9 @@ module Elm.Outline
   , read
   , write
   , encode
+  , encodeSrcDir
   , decoder
+  , dirsDecoder
   , defaultSummary
   , flattenExposed
 
@@ -85,8 +87,6 @@ data Exposed
 data SrcDir
   = AbsoluteSrcDir FilePath
   | RelativeSrcDir FilePath
-
-
 
 -- DEFAULTS
 

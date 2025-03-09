@@ -837,8 +837,6 @@ sendProgressEnd token = do
 
 Generally when a file change has been saved, or the user has changed what their looking at in the editor.
 
-
-
 -}
 recompile :: State -> FilePath -> IO ()
 recompile (State mProjects) changedFile = do
@@ -882,7 +880,7 @@ recompile (State mProjects) changedFile = do
         affectedProjects
 
 recompileProject :: ProjectCache -> IO ()
-recompileProject proj@(ProjectCache (Ext.Dev.Project.Project root _ entrypoints) cache) =
+recompileProject proj@(ProjectCache (Ext.Dev.Project.Project root _ entrypoints _) cache) =
   case entrypoints of
     [] ->
       do
@@ -894,7 +892,7 @@ recompileProject proj@(ProjectCache (Ext.Dev.Project.Project root _ entrypoints)
 
 
 recompileFile :: FilePath -> [FilePath] -> ProjectCache -> IO ()
-recompileFile top remain projCache@(ProjectCache proj@(Ext.Dev.Project.Project root pRoot entrypoints) cache) =
+recompileFile top remain projCache@(ProjectCache proj@(Ext.Dev.Project.Project root pRoot entrypoints _) cache) =
     do
       let entry = NonEmpty.List top remain
 

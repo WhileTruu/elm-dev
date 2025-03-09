@@ -402,7 +402,7 @@ decodeWatched =
 
 {- Encoding -}
 
-encodeStatus (Ext.Dev.Project.Project root projectRoot entrypoints, js) =
+encodeStatus (Ext.Dev.Project.Project root projectRoot entrypoints _, js) =
   Json.Encode.object
     [ "root" ==> Json.Encode.string (Json.String.fromChars root),
       "projectRoot" ==> Json.Encode.string (Json.String.fromChars projectRoot),
