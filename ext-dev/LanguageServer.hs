@@ -167,21 +167,32 @@ initializeProject accum project =
 
 data Cache =
   Cache
-    { compileResult :: MVar (Maybe (Either Exit.Reactor Build.Artifacts))
+    { prevPublishedDiagnosticsFiles :: MVar [FilePath]
+    , publishedDiagnosticsFiles :: MVar [FilePath]
     }
 
 cacheInit :: IO Cache
 cacheInit = do
-  compileResult <- newMVar (Nothing)
-  pure (Cache compileResult)
+  prevPublishedDiagnosticsFiles  <- newMVar []
+  publishedDiagnosticsFiles  <- newMVar []
 
-cacheUpdateCompileResult :: Cache -> IO (Either Exit.Reactor Build.Artifacts) -> IO ()
-cacheUpdateCompileResult (Cache compileResult) result =
-  modifyMVar_ compileResult (\_ -> fmap Just result)
+  pure (Cache prevPublishedDiagnosticsFiles publishedDiagnosticsFiles)
 
-cacheGetCompileResult :: Cache -> IO (Maybe (Either Exit.Reactor Build.Artifacts))
-cacheGetCompileResult (Cache compileResult) =
-  readMVar compileResult
+cacheUpdatePrevPublishedDiagnosticsFiles :: Cache -> ([FilePath] -> [FilePath]) -> IO ()
+cacheUpdatePrevPublishedDiagnosticsFiles (Cache prevPublishedDiagnosticsFiles _) f =
+  modifyMVar_ prevPublishedDiagnosticsFiles (\a -> pure (f a))
+
+cacheGetPrevPublishedDiagnosticsFiles :: Cache -> IO [FilePath]
+cacheGetPrevPublishedDiagnosticsFiles (Cache prevPublishedDiagnosticsFiles _) =
+  readMVar prevPublishedDiagnosticsFiles
+
+cacheUpdatePublishedDiagnosticsFiles :: Cache -> ([FilePath] -> [FilePath]) -> IO ()
+cacheUpdatePublishedDiagnosticsFiles (Cache _ publishedDiagnosticsFiles) f =
+  modifyMVar_ publishedDiagnosticsFiles (\a -> pure (f a))
+
+cacheGetPublishedDiagnosticsFiles :: Cache -> IO [FilePath]
+cacheGetPublishedDiagnosticsFiles (Cache _ publishedDiagnosticsFiles) =
+  readMVar publishedDiagnosticsFiles
 
 -- HEADER
 
@@ -420,7 +431,7 @@ handleRequest state@(State mProjects) request =
       sendCreateWorkDoneProgress "compile-progress"
       sendProgressBegin "compile-progress" "Compiling"
 
-      diagnosticsLol state filePath
+      recompile state filePath
 
       sendProgressEnd "compile-progress"
 
@@ -428,7 +439,7 @@ handleRequest state@(State mProjects) request =
       sendCreateWorkDoneProgress "compile-progress"
       sendProgressBegin "compile-progress" "Compiling"
 
-      diagnosticsLol state filePath
+      recompile state filePath
 
       sendProgressEnd "compile-progress"
 
@@ -829,50 +840,49 @@ Generally when a file change has been saved, or the user has changed what their 
 
 
 -}
-recompile :: State -> [String] -> IO ()
-recompile (State mProjects) allChangedFiles = do
-  let changedElmFiles = List.filter (\filepath -> ".elm" `List.isSuffixOf` filepath ) allChangedFiles
-  
+recompile :: State -> FilePath -> IO ()
+recompile (State mProjects) changedFile = do
+  projects <- STM.readTVarIO mProjects
+  let affectedProjects = Maybe.mapMaybe 
+                          (\projCache@(ProjectCache proj _) ->
+                            if Ext.Dev.Project.contains changedFile proj then Just projCache else Nothing
+                          ) 
+                          projects
 
-  if changedElmFiles /= [] then do
+  case affectedProjects of
+      [] ->
+          Ext.Log.log Ext.Log.Live "No affected projects"
+      _ ->
+          pure ()
 
-    projects <- STM.readTVarIO mProjects
-    let affectedProjects = Maybe.mapMaybe (toAffectedProject changedElmFiles) projects
-    case affectedProjects of
-        [] ->
-            Ext.Log.log Ext.Log.Live "No affected projects"
-        _ ->
-            pure ()
+  trackedForkIO $
+    track "recompile" $ do
 
-    trackedForkIO $
-      track "recompile" $ do
+      -- send down status for
+      Monad.mapM_ (recompileFile changedFile []) affectedProjects
 
-        -- send down status for
-        Monad.mapM_ recompileFile affectedProjects
+      -- Get the status of the entire project
+      Monad.mapM_ recompileProject affectedProjects
 
-        -- Get the status of the entire project
-        Monad.mapM_ recompileProject affectedProjects
+      Monad.mapM_ 
+        (\(ProjectCache _ cache) -> do
+          prevPublishedDiagnosticsFiles <- cacheGetPrevPublishedDiagnosticsFiles cache
+          publishedDiagnosticsFiles <- cacheGetPublishedDiagnosticsFiles cache
 
-  else
-    pure ()
+          let diff = List.filter (\a -> List.notElem a publishedDiagnosticsFiles)
+                      prevPublishedDiagnosticsFiles 
 
+          mapM_ (\a -> publishReportDiagnostic a []) diff
 
-toAffectedProject :: [String] -> ProjectCache -> Maybe (String, [String], ProjectCache)
-toAffectedProject changedFiles projCache@(ProjectCache proj@(Ext.Dev.Project.Project root _ _) cache) =
-      case changedFiles of
-        [] ->
-          Nothing
+          cacheUpdatePrevPublishedDiagnosticsFiles cache (\_ -> publishedDiagnosticsFiles)
+          cacheUpdatePublishedDiagnosticsFiles cache (\_ -> [])
 
-        (top : remain) ->
-          if List.any (\f -> Ext.Dev.Project.contains f proj) changedFiles then
-            Just (top, remain, projCache)
+          pure ()
+        )
+        affectedProjects
 
-          else
-              Nothing
-
-
-recompileProject :: (String, [String], ProjectCache) -> IO ()
-recompileProject ( _, _, proj@(ProjectCache (Ext.Dev.Project.Project root _ entrypoints) cache)) =
+recompileProject :: ProjectCache -> IO ()
+recompileProject proj@(ProjectCache (Ext.Dev.Project.Project root _ entrypoints) cache) =
   case entrypoints of
     [] ->
       do
@@ -880,86 +890,37 @@ recompileProject ( _, _, proj@(ProjectCache (Ext.Dev.Project.Project root _ entr
         pure ()
 
     topEntry : remainEntry -> do
-        recompileFile (topEntry, remainEntry, proj)
+        recompileFile topEntry remainEntry proj
 
 
-recompileFile :: (String, [String], ProjectCache) -> IO ()
-recompileFile ( top, remain, projCache@(ProjectCache proj@(Ext.Dev.Project.Project root pRoot entrypoints) cache)) =
+recompileFile :: FilePath -> [FilePath] -> ProjectCache -> IO ()
+recompileFile top remain projCache@(ProjectCache proj@(Ext.Dev.Project.Project root pRoot entrypoints) cache) =
     do
       let entry = NonEmpty.List top remain
-
-      cacheCompileResult <- cacheGetCompileResult cache
-
-      case cacheCompileResult of
-        Just (Left exitReactor) -> do
-          let report = Exit.reactorToReport exitReactor
-
-          case report of
-            ExitHelp.CompilerReport filePath e es ->
-              mapM_
-                (\(Reporting.Error.Module name path _ source err) ->
-                  sendNotification "textDocument/publishDiagnostics"
-                    (Aeson.object
-                      [ "uri" Aeson..= ("file://" ++ path :: String)
-                      , "diagnostics" Aeson..= ([] :: [Aeson.Value])
-                      ]
-                    )
-                )
-                (e : es)
-
-            ExitHelp.Report title maybePath message ->
-              pure ()
-
-        _ ->
-          pure ()
 
       -- Compile all changed files
       result <- Ext.CompileHelpers.Disk.compileWithoutJsGen root entry
 
-      cacheUpdateCompileResult cache $
-        pure (result)
-
       -- Send compilation status
       case result of
         Right artifacts -> do
-
           mapM_
             (\path -> do
               source <- File.readUtf8 path
               (Ext.Dev.Info warnings docs) <- Ext.Dev.info root path
-              let warningReports = case warnings of
-                                    Nothing -> []
-                                    Just (sourceMod, warns) ->
-                                      map
-                                        (Reporting.Warning.toReport
-                                          (Reporting.Render.Type.Localizer.fromModule sourceMod)
-                                          (Code.toSource source)
-                                        )
-                                        warns
 
-              sendNotification "textDocument/publishDiagnostics"
-                    (Aeson.object
-                      [ "uri" Aeson..= ("file://" ++ path :: String)
-                      , "diagnostics" Aeson..= map
-                        (\(Report.Report title (Ann.Region (Ann.Position sr sc) (Ann.Position er ec)) _sgstns message) ->
-                          Aeson.object
-                            [ "range" Aeson..= Aeson.object
-                              [ "start" Aeson..= Aeson.object
-                                [ "line" Aeson..= (sr - 1)
-                                , "character" Aeson..= (sc - 1)
-                                ]
-                              , "end" Aeson..= Aeson.object
-                                [ "line" Aeson..= (er - 1)
-                                , "character" Aeson..= (ec - 1)
-                                ]
-                              ]
-                            , "severity" Aeson..= (2 :: Int)
-                            , "message" Aeson..= (title ++ "\n\n" ++ Reporting.Doc.toString message :: String)
-                            ]
-                        )
-                        warningReports
-                      ]
-                    )
+              case warnings of
+                Nothing -> pure ()
+                Just (sourceMod, warns) -> do
+                  publishReportDiagnostic path $
+                    map
+                      (Reporting.Warning.toReport
+                        (Reporting.Render.Type.Localizer.fromModule sourceMod)
+                        (Code.toSource source)
+                      )
+                      warns
+
+                  cacheUpdatePublishedDiagnosticsFiles cache (\a -> path : a)
             )
             (top : remain)
 
@@ -969,34 +930,12 @@ recompileFile ( top, remain, projCache@(ProjectCache proj@(Ext.Dev.Project.Proje
           case report of
             ExitHelp.CompilerReport filePath e es ->
               mapM_
-                (\(Reporting.Error.Module name path _ source err) ->
-                  let
-                    reports = Reporting.Error.toReports (Code.toSource source) err
+                (\(Reporting.Error.Module name path _ source err) -> do
+                  publishReportDiagnostic path 
+                    $ NE.toList 
+                    $ Reporting.Error.toReports (Code.toSource source) err
 
-                  in
-                  sendNotification "textDocument/publishDiagnostics"
-                    (Aeson.object
-                      [ "uri" Aeson..= ("file://" ++ path :: String)
-                      , "diagnostics" Aeson..= map
-                        (\(Report.Report title (Ann.Region (Ann.Position sr sc) (Ann.Position er ec)) _sgstns message) ->
-                          Aeson.object
-                            [ "range" Aeson..= Aeson.object
-                              [ "start" Aeson..= Aeson.object
-                                [ "line" Aeson..= (sr - 1)
-                                , "character" Aeson..= (sc - 1)
-                                ]
-                              , "end" Aeson..= Aeson.object
-                                [ "line" Aeson..= (er - 1)
-                                , "character" Aeson..= (ec - 1)
-                                ]
-                              ]
-                            , "severity" Aeson..= (1 :: Int)
-                            , "message" Aeson..= (title ++ "\n\n" ++ Reporting.Doc.toString message :: String)
-                            ]
-                        )
-                        (NE.toList reports)
-                      ]
-                    )
+                  cacheUpdatePublishedDiagnosticsFiles cache (\a -> path : a)
                 )
                 (e : es)
 
@@ -1008,212 +947,31 @@ recompileFile ( top, remain, projCache@(ProjectCache proj@(Ext.Dev.Project.Proje
                   ]
                 )
 
-diagnosticsLol :: State -> FilePath -> IO ()
-diagnosticsLol (State mProjects) filePath = do
-  -- let changedElmFiles = List.filter (\filepath -> ".elm" `List.isSuffixOf` filepath ) allChangedFiles
-  
-  sendNotification "window/logMessage"
+publishReportDiagnostic :: FilePath -> [Report.Report] -> IO ()
+publishReportDiagnostic filePath reports =
+  sendNotification "textDocument/publishDiagnostics"
     (Aeson.object
-      [ "type" Aeson..= (1 :: Int)
-      , "message" Aeson..= filePath
+      [ "uri" Aeson..= ("file://" ++ filePath :: String)
+      , "diagnostics" Aeson..= map
+        (\(Report.Report title (Ann.Region (Ann.Position sr sc) (Ann.Position er ec)) _sgstns message) ->
+          Aeson.object
+            [ "range" Aeson..= Aeson.object
+              [ "start" Aeson..= Aeson.object
+                [ "line" Aeson..= (sr - 1)
+                , "character" Aeson..= (sc - 1)
+                ]
+              , "end" Aeson..= Aeson.object
+                [ "line" Aeson..= (er - 1)
+                , "character" Aeson..= (ec - 1)
+                ]
+              ]
+            , "severity" Aeson..= (1 :: Int)
+            , "message" Aeson..= (title ++ "\n\n" ++ Reporting.Doc.toString message :: String)
+            ]
+        )
+        reports
       ]
     )
-
-
-  -- if changedElmFiles /= [] then do
-
-  projects <- STM.readTVarIO mProjects
-  let affectedProjects = Maybe.mapMaybe 
-                          (\projCache@(ProjectCache proj _) -> 
-                            if Ext.Dev.Project.contains filePath proj then Just projCache else Nothing
-                          ) 
-                          projects
-
-  case affectedProjects of
-      [] ->
-          sendNotification "window/logMessage"
-            (Aeson.object
-              [ "type" Aeson..= (1 :: Int)
-              , "message" Aeson..= ("No affected projects" :: String)
-              ]
-            )
-      _ ->
-          pure ()
-
-  trackedForkIO $
-    track "recompile" $ do
-
-      -- send down status for
-      x <- mapM 
-            (\(projCache@(ProjectCache proj@(Ext.Dev.Project.Project root pRoot entrypoints) cache)) -> do
-              -- cacheCompileResult <- cacheGetCompileResult cache
-              -- cacheReports <- mapM (getReports (filePath, [], proj)) cacheCompileResult
-              -- let clearedCacheReports = case cacheReports of
-              --                             Just (Left reports) -> Map.map (\_ -> []) reports
-              --                             _ -> Map.empty
-
-              result <- Ext.CompileHelpers.Disk.compileWithoutJsGen root (NE.singleton filePath)
-              reports <- getReports (filePath, [], proj) result
-
-              cacheUpdateCompileResult cache $
-                pure (result)
-
-              case reports of
-                -- Left reportMap -> pure $ Left (Map.union reportMap clearedCacheReports) 
-                Left reportMap -> pure $ Left (reportMap) 
-                Right right -> pure $ Right right
-            ) 
-            affectedProjects
-
-      -- Get the status of the entire project
-      y <- mapM (\(ProjectCache proj@(Ext.Dev.Project.Project root _ entrypoints) cache) ->
-        case entrypoints of
-          [] -> pure $ Left Map.empty
-
-          topEntry : remainEntry -> do
-              -- cacheCompileResult <- cacheGetCompileResult cache
-              -- cacheReports <- mapM (getReports (topEntry, remainEntry, proj)) cacheCompileResult
-              -- let clearedCacheReports = case cacheReports of
-              --                             Just (Left reports) -> Map.map (\_ -> []) reports
-              --                             _ -> Map.empty
-              --
-              result <- Ext.CompileHelpers.Disk.compileWithoutJsGen root (NE.List topEntry remainEntry)
-
-              cacheUpdateCompileResult cache $
-                pure (result)
-
-              reports <- getReports (topEntry, remainEntry, proj) result
-
-
-
-              case reports of
-                -- Left reportMap -> pure $ Left (Map.union reportMap clearedCacheReports) 
-                Left reportMap -> pure $ Left reportMap
-                Right right -> pure $ Right right
-          )
-          affectedProjects
-
-      let allReports = foldl 
-                        (\acc a -> case a of
-                                    Left left -> Map.union left acc
-                                    _ -> acc
-                        )
-                        Map.empty
-                        (x ++ y) 
-      
-      let allMessages = foldl
-                        (\acc a -> case a of
-                                    Right right -> right : acc
-                                    _ -> acc
-                        )
-                        []
-                        (x ++ y)
-      let xReports = foldl 
-                        (\acc a -> case a of
-                                    Left left -> Map.union left acc
-                                    _ -> acc
-                        )
-                        Map.empty
-                        (x)      
-      let yReports = foldl 
-                        (\acc a -> case a of
-                                    Left left -> Map.union left acc
-                                    _ -> acc
-                        )
-                        Map.empty
-                        (y)      
-      sendNotification "window/logMessage"
-        (Aeson.object
-          [ "type" Aeson..= (1 :: Int)
-          , "message" Aeson..= ("x reports" ++ show (Map.keys xReports) :: String)
-          ]
-        )
-      sendNotification "window/logMessage"
-        (Aeson.object
-          [ "type" Aeson..= (1 :: Int)
-          , "message" Aeson..= ("y reports" ++ show (Map.keys yReports) :: String)
-          ]
-        )
-
-      _ <- Map.traverseWithKey
-          (\paath reports ->
-            sendNotification "textDocument/publishDiagnostics"
-              (Aeson.object
-                [ "uri" Aeson..= ("file://" ++ paath :: String)
-                , "diagnostics" Aeson..= map
-                  (\(Report.Report title (Ann.Region (Ann.Position sr sc) (Ann.Position er ec)) _sgstns message) ->
-                    Aeson.object
-                      [ "range" Aeson..= Aeson.object
-                        [ "start" Aeson..= Aeson.object
-                          [ "line" Aeson..= (sr - 1)
-                          , "character" Aeson..= (sc - 1)
-                          ]
-                        , "end" Aeson..= Aeson.object
-                          [ "line" Aeson..= (er - 1)
-                          , "character" Aeson..= (ec - 1)
-                          ]
-                        ]
-                      , "severity" Aeson..= (1 :: Int)
-                      , "message" Aeson..= (title ++ "\n\n" ++ Reporting.Doc.toString message :: String)
-                      ]
-                  )
-                  reports
-                ]
-              )
-          )
-          allReports
-
-      pure ()
-
-  -- else
-  --   pure ()
-
-getReports :: (String, [String], Ext.Dev.Project.Project) -> Either Exit.Reactor Build.Artifacts -> IO (Either (Map.Map String [Report.Report]) String)
-getReports (top, remain, proj) result =
-  case result of
-    Right artifacts -> Left <$> getArtifactsReports (top, remain, proj) artifacts
-    Left reactor -> pure (getReactorReports reactor) 
-
-
-getArtifactsReports :: (String, [String], Ext.Dev.Project.Project) -> Build.Artifacts -> IO (Map.Map String [Report.Report])
-getArtifactsReports (top, remain, Ext.Dev.Project.Project root _ _) artifacts = do
-      -- Send compilation status
-    Map.fromList <$> mapM
-      (\path -> do
-        source <- File.readUtf8 path
-        (Ext.Dev.Info warnings docs) <- Ext.Dev.info root path
-        let warningReports = case warnings of
-                              Nothing -> []
-                              Just (sourceMod, warns) ->
-                                map
-                                  (Reporting.Warning.toReport
-                                    (Reporting.Render.Type.Localizer.fromModule sourceMod)
-                                    (Code.toSource source)
-                                  )
-                                  warns
-
-        pure (path, warningReports)
-      )
-      (top : remain)
-
-
-getReactorReports :: Exit.Reactor -> Either (Map.Map String [Report.Report]) String
-getReactorReports reactor =
-    let report = Exit.reactorToReport reactor in
-
-    case report of
-      ExitHelp.CompilerReport filePath e es -> 
-        Left $ Map.fromList $
-            map 
-              (\(Reporting.Error.Module name path _ source err) -> 
-                (path, NE.toList (Reporting.Error.toReports (Code.toSource source) err))
-              ) 
-              (e : es)
-
-      ExitHelp.Report title maybePath message ->
-        Right (ExitHelp.toString (ExitHelp.reportToDoc report))
-
-
 
 -- RESPONSE
 
