@@ -152,7 +152,7 @@ compileToJson root paths = do
 compileWithoutJsGen :: FilePath -> NE.List FilePath -> IO (Either Exit.Reactor ())
 compileWithoutJsGen root paths = do
   modeRunner
-    "compileToJson"
+    "compileWithoutJsGen"
     (fmap (fmap (const ())) $ Ext.CompileHelpers.Disk.compileWithoutJsGen root paths)
     (Ext.CompileHelpers.Memory.compileWithoutJsGen root paths)
 

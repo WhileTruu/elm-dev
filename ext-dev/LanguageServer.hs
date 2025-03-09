@@ -32,6 +32,7 @@ import qualified Ext.Dev.Find
 import qualified Ext.Log
 import qualified GHC.Generics as Generics
 import qualified Json.Encode
+import qualified Build
 import qualified Reporting.Annotation as Ann
 import qualified Snap.Core hiding (path)
 import qualified Snap.Http.Server
@@ -54,6 +55,7 @@ import Ext.Common
 import qualified Ext.Dev
 import qualified Reporting.Render.Type.Localizer
 import qualified Ext.CompileProxy
+import qualified Ext.CompileHelpers.Disk
 import qualified Reporting.Exit as Exit
 import qualified Reporting.Exit.Help as ExitHelp
 import qualified Reporting.Error
@@ -73,6 +75,7 @@ import Data.Name (Name)
 import Control.Concurrent
 import qualified Ext.Dev.Find.Source
 import qualified AST.Source as Src
+import qualified AST.Optimized as Opt
 import qualified Data.Bifunctor
 import qualified Data.Set as Set
 import qualified Elm.Details
@@ -806,7 +809,7 @@ recompile (State mProjects) allChangedFiles = do
 
 
 toAffectedProject :: [String] -> Client.ProjectCache -> Maybe (String, [String], Client.ProjectCache)
-toAffectedProject changedFiles projCache@(Client.ProjectCache proj@(Ext.Dev.Project.Project projectRoot entrypoints) cache) =
+toAffectedProject changedFiles projCache@(Client.ProjectCache proj@(Ext.Dev.Project.Project root _ _) cache) =
       case changedFiles of
         [] ->
           Nothing
@@ -820,42 +823,49 @@ toAffectedProject changedFiles projCache@(Client.ProjectCache proj@(Ext.Dev.Proj
 
 
 recompileProject :: (String, [String], Client.ProjectCache) -> IO ()
-recompileProject ( _, _, proj@(Client.ProjectCache (Ext.Dev.Project.Project projectRoot entrypoints) cache)) =
+recompileProject ( _, _, proj@(Client.ProjectCache (Ext.Dev.Project.Project root _ entrypoints) cache)) =
   case entrypoints of
     [] ->
       do
-        Ext.Log.log Ext.Log.Live ("Skipping compile, no entrypoint: " <> projectRoot)
+        Ext.Log.log Ext.Log.Live ("Skipping compile, no entrypoint: " <> root)
         pure ()
 
-    topEntry : remainEntry ->
+    topEntry : remainEntry -> do
         recompileFile (topEntry, remainEntry, proj)
 
 
 recompileFile :: (String, [String], Client.ProjectCache) -> IO ()
-recompileFile ( top, remain, projCache@(Client.ProjectCache proj@(Ext.Dev.Project.Project projectRoot entrypoints) cache)) =
+recompileFile ( top, remain, projCache@(Client.ProjectCache proj@(Ext.Dev.Project.Project root pRoot entrypoints) cache)) =
     do
       let entry = NonEmpty.List top remain
 
+      project <- Ext.CompileProxy.loadProject root
+
+      let x = List.map (\(a, local) -> 
+                Elm.Details._path local
+              ) (Map.toList (Elm.Details._locals project))
+
+      mapM_
+        (\path -> do
+              sendNotification "textDocument/publishDiagnostics"
+                (Aeson.object
+                  [ "uri" Aeson..= ("file://" ++ path :: String)
+                  , "diagnostics" Aeson..= ( [] :: [Aeson.Value] )
+                  ]
+                )
+        )
+        x
       -- Compile all changed files
-      result <- Ext.CompileProxy.compileWithoutJsGen projectRoot entry
-
-      -- TODO: figure out that the following code did :D
-      --
-      -- Ext.Sentry.updateCompileResult cache $
-      --   pure $ case result of
-      --     Right _ ->
-      --       Right $ Aeson.object [ "compiled" ==> Encode.bool True ]
-
-      --     Left exit -> do
-      --       Left $ Exit.toJson $ Exit.reactorToReport exit
+      result <- Ext.CompileHelpers.Disk.compileWithoutJsGen root entry
 
       -- Send compilation status
       case result of
-        Right _ ->
+        Right artifacts -> do
+
           mapM_
             (\path -> do
               source <- File.readUtf8 path
-              (Ext.Dev.Info warnings docs) <- Ext.Dev.info projectRoot path
+              (Ext.Dev.Info warnings docs) <- Ext.Dev.info root path
               let warningReports = case warnings of
                                     Nothing -> []
                                     Just (sourceMod, warns) ->
