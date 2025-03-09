@@ -108,7 +108,7 @@ serve = do
 
 
 data State = State
-  { projects :: STM.TVar [Client.ProjectCache]
+  { projects :: STM.TVar [ProjectCache]
   }
 
 
@@ -122,7 +122,7 @@ getRoot path (State mProjects) =
 getRootHelp path projects found =
   case projects of
     [] -> found
-    (Client.ProjectCache project _) : remain ->
+    (ProjectCache project _) : remain ->
       if Ext.Dev.Project.contains path project
         then case found of
           Nothing ->
@@ -134,6 +134,54 @@ getRootHelp path projects found =
         else getRootHelp path remain found
 
 
+data ProjectCache = ProjectCache
+  { project :: Ext.Dev.Project.Project,
+    cache :: Cache
+  }
+
+matchingProject :: ProjectCache -> ProjectCache -> Bool
+matchingProject (ProjectCache one _) (ProjectCache two _) =
+  Ext.Dev.Project.equal one two
+
+discoverProjects :: FilePath -> IO [ProjectCache]
+discoverProjects root = do
+  projects <- Ext.Dev.Project.discover root
+
+  let projectTails = fmap (getProjectShorthand root) projects
+  Ext.Log.log Ext.Log.Live (("👁️  found projects\n" ++ root) <> formatList projectTails)
+  Monad.foldM initializeProject [] projects
+
+getProjectShorthand :: FilePath -> Ext.Dev.Project.Project -> FilePath
+getProjectShorthand root proj =
+  case List.stripPrefix root (Ext.Dev.Project.getRoot proj) of
+    Nothing -> "."
+    Just "" -> "."
+    Just str ->
+      str
+
+initializeProject :: [ProjectCache] -> Ext.Dev.Project.Project -> IO [ProjectCache]
+initializeProject accum project =
+  do
+    cache <- cacheInit
+    pure (ProjectCache project cache : accum)
+
+data Cache =
+  Cache
+    { compileResult :: MVar (Maybe (Either Exit.Reactor Build.Artifacts))
+    }
+
+cacheInit :: IO Cache
+cacheInit = do
+  compileResult <- newMVar (Nothing)
+  pure (Cache compileResult)
+
+cacheUpdateCompileResult :: Cache -> IO (Either Exit.Reactor Build.Artifacts) -> IO ()
+cacheUpdateCompileResult (Cache compileResult) result =
+  modifyMVar_ compileResult (\_ -> fmap Just result)
+
+cacheGetCompileResult :: Cache -> IO (Maybe (Either Exit.Reactor Build.Artifacts))
+cacheGetCompileResult (Cache compileResult) =
+  readMVar compileResult
 
 -- HEADER
 
@@ -268,14 +316,14 @@ handleRequest state@(State mProjects) request =
       sendCreateWorkDoneProgress "initialization-progress"
       sendProgressBegin "initialization-progress" "Discovering projects"
 
-      discovered <- Watchtower.Live.discoverProjects rootPath
+      discovered <- discoverProjects rootPath
       STM.atomically $ do
         STM.modifyTVar
           mProjects
           ( \projects ->
               List.foldl
                 ( \existing new ->
-                    if List.any (Client.matchingProject new) existing
+                    if List.any (matchingProject new) existing
                       then existing
                       else new : existing
                 )
@@ -372,7 +420,7 @@ handleRequest state@(State mProjects) request =
       sendCreateWorkDoneProgress "compile-progress"
       sendProgressBegin "compile-progress" "Compiling"
 
-      recompile state [filePath]
+      diagnosticsLol state filePath
 
       sendProgressEnd "compile-progress"
 
@@ -380,7 +428,7 @@ handleRequest state@(State mProjects) request =
       sendCreateWorkDoneProgress "compile-progress"
       sendProgressBegin "compile-progress" "Compiling"
 
-      recompile state [filePath]
+      diagnosticsLol state filePath
 
       sendProgressEnd "compile-progress"
 
@@ -784,6 +832,7 @@ Generally when a file change has been saved, or the user has changed what their 
 recompile :: State -> [String] -> IO ()
 recompile (State mProjects) allChangedFiles = do
   let changedElmFiles = List.filter (\filepath -> ".elm" `List.isSuffixOf` filepath ) allChangedFiles
+  
 
   if changedElmFiles /= [] then do
 
@@ -808,8 +857,8 @@ recompile (State mProjects) allChangedFiles = do
     pure ()
 
 
-toAffectedProject :: [String] -> Client.ProjectCache -> Maybe (String, [String], Client.ProjectCache)
-toAffectedProject changedFiles projCache@(Client.ProjectCache proj@(Ext.Dev.Project.Project root _ _) cache) =
+toAffectedProject :: [String] -> ProjectCache -> Maybe (String, [String], ProjectCache)
+toAffectedProject changedFiles projCache@(ProjectCache proj@(Ext.Dev.Project.Project root _ _) cache) =
       case changedFiles of
         [] ->
           Nothing
@@ -822,8 +871,8 @@ toAffectedProject changedFiles projCache@(Client.ProjectCache proj@(Ext.Dev.Proj
               Nothing
 
 
-recompileProject :: (String, [String], Client.ProjectCache) -> IO ()
-recompileProject ( _, _, proj@(Client.ProjectCache (Ext.Dev.Project.Project root _ entrypoints) cache)) =
+recompileProject :: (String, [String], ProjectCache) -> IO ()
+recompileProject ( _, _, proj@(ProjectCache (Ext.Dev.Project.Project root _ entrypoints) cache)) =
   case entrypoints of
     [] ->
       do
@@ -834,29 +883,41 @@ recompileProject ( _, _, proj@(Client.ProjectCache (Ext.Dev.Project.Project root
         recompileFile (topEntry, remainEntry, proj)
 
 
-recompileFile :: (String, [String], Client.ProjectCache) -> IO ()
-recompileFile ( top, remain, projCache@(Client.ProjectCache proj@(Ext.Dev.Project.Project root pRoot entrypoints) cache)) =
+recompileFile :: (String, [String], ProjectCache) -> IO ()
+recompileFile ( top, remain, projCache@(ProjectCache proj@(Ext.Dev.Project.Project root pRoot entrypoints) cache)) =
     do
       let entry = NonEmpty.List top remain
 
-      project <- Ext.CompileProxy.loadProject root
+      cacheCompileResult <- cacheGetCompileResult cache
 
-      let x = List.map (\(a, local) -> 
-                Elm.Details._path local
-              ) (Map.toList (Elm.Details._locals project))
+      case cacheCompileResult of
+        Just (Left exitReactor) -> do
+          let report = Exit.reactorToReport exitReactor
 
-      mapM_
-        (\path -> do
-              sendNotification "textDocument/publishDiagnostics"
-                (Aeson.object
-                  [ "uri" Aeson..= ("file://" ++ path :: String)
-                  , "diagnostics" Aeson..= ( [] :: [Aeson.Value] )
-                  ]
+          case report of
+            ExitHelp.CompilerReport filePath e es ->
+              mapM_
+                (\(Reporting.Error.Module name path _ source err) ->
+                  sendNotification "textDocument/publishDiagnostics"
+                    (Aeson.object
+                      [ "uri" Aeson..= ("file://" ++ path :: String)
+                      , "diagnostics" Aeson..= ([] :: [Aeson.Value])
+                      ]
+                    )
                 )
-        )
-        x
+                (e : es)
+
+            ExitHelp.Report title maybePath message ->
+              pure ()
+
+        _ ->
+          pure ()
+
       -- Compile all changed files
       result <- Ext.CompileHelpers.Disk.compileWithoutJsGen root entry
+
+      cacheUpdateCompileResult cache $
+        pure (result)
 
       -- Send compilation status
       case result of
@@ -875,12 +936,6 @@ recompileFile ( top, remain, projCache@(Client.ProjectCache proj@(Ext.Dev.Projec
                                           (Code.toSource source)
                                         )
                                         warns
-              -- case docs of
-              --   Nothing -> pure ()
-
-              --   Just docs ->
-              --     Client.broadcast mClients
-              --       (Client.Docs top [ docs ])
 
               sendNotification "textDocument/publishDiagnostics"
                     (Aeson.object
@@ -952,6 +1007,211 @@ recompileFile ( top, remain, projCache@(Client.ProjectCache proj@(Ext.Dev.Projec
                   , "message" Aeson..= ExitHelp.toString (ExitHelp.reportToDoc report)
                   ]
                 )
+
+diagnosticsLol :: State -> FilePath -> IO ()
+diagnosticsLol (State mProjects) filePath = do
+  -- let changedElmFiles = List.filter (\filepath -> ".elm" `List.isSuffixOf` filepath ) allChangedFiles
+  
+  sendNotification "window/logMessage"
+    (Aeson.object
+      [ "type" Aeson..= (1 :: Int)
+      , "message" Aeson..= filePath
+      ]
+    )
+
+
+  -- if changedElmFiles /= [] then do
+
+  projects <- STM.readTVarIO mProjects
+  let affectedProjects = Maybe.mapMaybe 
+                          (\projCache@(ProjectCache proj _) -> 
+                            if Ext.Dev.Project.contains filePath proj then Just projCache else Nothing
+                          ) 
+                          projects
+
+  case affectedProjects of
+      [] ->
+          sendNotification "window/logMessage"
+            (Aeson.object
+              [ "type" Aeson..= (1 :: Int)
+              , "message" Aeson..= ("No affected projects" :: String)
+              ]
+            )
+      _ ->
+          pure ()
+
+  trackedForkIO $
+    track "recompile" $ do
+
+      -- send down status for
+      x <- mapM 
+            (\(projCache@(ProjectCache proj@(Ext.Dev.Project.Project root pRoot entrypoints) cache)) -> do
+              -- cacheCompileResult <- cacheGetCompileResult cache
+              -- cacheReports <- mapM (getReports (filePath, [], proj)) cacheCompileResult
+              -- let clearedCacheReports = case cacheReports of
+              --                             Just (Left reports) -> Map.map (\_ -> []) reports
+              --                             _ -> Map.empty
+
+              result <- Ext.CompileHelpers.Disk.compileWithoutJsGen root (NE.singleton filePath)
+              reports <- getReports (filePath, [], proj) result
+
+              cacheUpdateCompileResult cache $
+                pure (result)
+
+              case reports of
+                -- Left reportMap -> pure $ Left (Map.union reportMap clearedCacheReports) 
+                Left reportMap -> pure $ Left (reportMap) 
+                Right right -> pure $ Right right
+            ) 
+            affectedProjects
+
+      -- Get the status of the entire project
+      y <- mapM (\(ProjectCache proj@(Ext.Dev.Project.Project root _ entrypoints) cache) ->
+        case entrypoints of
+          [] -> pure $ Left Map.empty
+
+          topEntry : remainEntry -> do
+              -- cacheCompileResult <- cacheGetCompileResult cache
+              -- cacheReports <- mapM (getReports (topEntry, remainEntry, proj)) cacheCompileResult
+              -- let clearedCacheReports = case cacheReports of
+              --                             Just (Left reports) -> Map.map (\_ -> []) reports
+              --                             _ -> Map.empty
+              --
+              result <- Ext.CompileHelpers.Disk.compileWithoutJsGen root (NE.List topEntry remainEntry)
+
+              cacheUpdateCompileResult cache $
+                pure (result)
+
+              reports <- getReports (topEntry, remainEntry, proj) result
+
+
+
+              case reports of
+                -- Left reportMap -> pure $ Left (Map.union reportMap clearedCacheReports) 
+                Left reportMap -> pure $ Left reportMap
+                Right right -> pure $ Right right
+          )
+          affectedProjects
+
+      let allReports = foldl 
+                        (\acc a -> case a of
+                                    Left left -> Map.union left acc
+                                    _ -> acc
+                        )
+                        Map.empty
+                        (x ++ y) 
+      
+      let allMessages = foldl
+                        (\acc a -> case a of
+                                    Right right -> right : acc
+                                    _ -> acc
+                        )
+                        []
+                        (x ++ y)
+      let xReports = foldl 
+                        (\acc a -> case a of
+                                    Left left -> Map.union left acc
+                                    _ -> acc
+                        )
+                        Map.empty
+                        (x)      
+      let yReports = foldl 
+                        (\acc a -> case a of
+                                    Left left -> Map.union left acc
+                                    _ -> acc
+                        )
+                        Map.empty
+                        (y)      
+      sendNotification "window/logMessage"
+        (Aeson.object
+          [ "type" Aeson..= (1 :: Int)
+          , "message" Aeson..= ("x reports" ++ show (Map.keys xReports) :: String)
+          ]
+        )
+      sendNotification "window/logMessage"
+        (Aeson.object
+          [ "type" Aeson..= (1 :: Int)
+          , "message" Aeson..= ("y reports" ++ show (Map.keys yReports) :: String)
+          ]
+        )
+
+      _ <- Map.traverseWithKey
+          (\paath reports ->
+            sendNotification "textDocument/publishDiagnostics"
+              (Aeson.object
+                [ "uri" Aeson..= ("file://" ++ paath :: String)
+                , "diagnostics" Aeson..= map
+                  (\(Report.Report title (Ann.Region (Ann.Position sr sc) (Ann.Position er ec)) _sgstns message) ->
+                    Aeson.object
+                      [ "range" Aeson..= Aeson.object
+                        [ "start" Aeson..= Aeson.object
+                          [ "line" Aeson..= (sr - 1)
+                          , "character" Aeson..= (sc - 1)
+                          ]
+                        , "end" Aeson..= Aeson.object
+                          [ "line" Aeson..= (er - 1)
+                          , "character" Aeson..= (ec - 1)
+                          ]
+                        ]
+                      , "severity" Aeson..= (1 :: Int)
+                      , "message" Aeson..= (title ++ "\n\n" ++ Reporting.Doc.toString message :: String)
+                      ]
+                  )
+                  reports
+                ]
+              )
+          )
+          allReports
+
+      pure ()
+
+  -- else
+  --   pure ()
+
+getReports :: (String, [String], Ext.Dev.Project.Project) -> Either Exit.Reactor Build.Artifacts -> IO (Either (Map.Map String [Report.Report]) String)
+getReports (top, remain, proj) result =
+  case result of
+    Right artifacts -> Left <$> getArtifactsReports (top, remain, proj) artifacts
+    Left reactor -> pure (getReactorReports reactor) 
+
+
+getArtifactsReports :: (String, [String], Ext.Dev.Project.Project) -> Build.Artifacts -> IO (Map.Map String [Report.Report])
+getArtifactsReports (top, remain, Ext.Dev.Project.Project root _ _) artifacts = do
+      -- Send compilation status
+    Map.fromList <$> mapM
+      (\path -> do
+        source <- File.readUtf8 path
+        (Ext.Dev.Info warnings docs) <- Ext.Dev.info root path
+        let warningReports = case warnings of
+                              Nothing -> []
+                              Just (sourceMod, warns) ->
+                                map
+                                  (Reporting.Warning.toReport
+                                    (Reporting.Render.Type.Localizer.fromModule sourceMod)
+                                    (Code.toSource source)
+                                  )
+                                  warns
+
+        pure (path, warningReports)
+      )
+      (top : remain)
+
+
+getReactorReports :: Exit.Reactor -> Either (Map.Map String [Report.Report]) String
+getReactorReports reactor =
+    let report = Exit.reactorToReport reactor in
+
+    case report of
+      ExitHelp.CompilerReport filePath e es -> 
+        Left $ Map.fromList $
+            map 
+              (\(Reporting.Error.Module name path _ source err) -> 
+                (path, NE.toList (Reporting.Error.toReports (Code.toSource source) err))
+              ) 
+              (e : es)
+
+      ExitHelp.Report title maybePath message ->
+        Right (ExitHelp.toString (ExitHelp.reportToDoc report))
 
 
 
