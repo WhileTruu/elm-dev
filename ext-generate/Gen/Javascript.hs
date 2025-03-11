@@ -16,10 +16,14 @@ import System.FilePath ((</>))
 -- | Load a file at compile time
 generatorJs :: BS.ByteString
 generatorJs =
-     $(Data.FileEmbed.bsToExp =<< 
-        Language.Haskell.TH.runIO 
-            (BS.readFile ("ext-generate" </> "generator" </> "dist" </> "run.js"))
-    )
+    --  $(Data.FileEmbed.bsToExp =<< 
+    --     Language.Haskell.TH.runIO 
+    --         (BS.readFile ("ext-generate" </> "generator" </> "dist" </> "run.js"))
+    -- )
+    -- FIXME: fake stuff so that stack can build things
+    -- 
+    C8.pack "console.log('Hello, World!');"
+
 
 -- | Execute embedded JavaScript using Bun
 
