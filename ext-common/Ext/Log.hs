@@ -197,4 +197,4 @@ printouts are atomic and un-garbled.
 -}
 atomicPutStrLn :: String -> IO ()
 atomicPutStrLn str =
-  withMVar printLock (\_ -> IO.hPutStr IO.stdout (str <> "\n") >> IO.hFlush IO.stdout)
+  withMVar printLock (\_ -> IO.hPutStr IO.stderr (str <> "\n") >> IO.hFlush IO.stderr)

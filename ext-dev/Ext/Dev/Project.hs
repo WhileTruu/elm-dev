@@ -37,6 +37,7 @@ import qualified System.Directory as Dir
 import System.FilePath as FP ((</>))
 import Prelude hiding (lookup)
 import qualified Data.NonEmptyList as NE
+import Ext.FileProxy as File
 
 import StandaloneInstances
 
@@ -220,12 +221,19 @@ createProject projectRoot elmJsonRoot = do
   outlineResult <- Elm.Outline.read elmJsonRoot
   case outlineResult of
     Right (Elm.Outline.App outline) -> do
-      maybeElmMain <- findFirstFileNamed "Main.elm" elmJsonRoot
-      case maybeElmMain of
-        Nothing ->
-          pure (Project elmJsonRoot projectRoot [] (NE.toList (Elm.Outline._app_source_dirs outline)))
-        Just main -> do
-          pure (Project elmJsonRoot projectRoot [main] (NE.toList (Elm.Outline._app_source_dirs outline)))
+      customMains <- getCustomMains elmJsonRoot
+
+      case customMains of
+        [] -> do
+          maybeElmMain <- findFirstFileNamed "Main.elm" elmJsonRoot
+          case maybeElmMain of
+            Nothing ->
+              pure (Project elmJsonRoot projectRoot [] (NE.toList (Elm.Outline._app_source_dirs outline)))
+            Just main -> do
+              pure (Project elmJsonRoot projectRoot [main] (NE.toList (Elm.Outline._app_source_dirs outline)))
+        _ ->
+          pure (Project elmJsonRoot projectRoot customMains (NE.toList (Elm.Outline._app_source_dirs outline)))
+
     Right (Elm.Outline.Pkg pkg) -> do
       case Elm.Outline._pkg_exposed pkg of
         Elm.Outline.ExposedList rawModNameList ->
@@ -251,6 +259,31 @@ createProject projectRoot elmJsonRoot = do
           ( "Elm Outline Error: " <> Exit.toString (Exit.toOutlineReport err)
           )
       pure (Project elmJsonRoot projectRoot [] [])
+
+getCustomMains :: FilePath -> IO [FilePath]
+getCustomMains root = do
+  elmlsconfExists <- Dir.doesFileExist (root </> ".whiletruu_elmls.json")
+  if elmlsconfExists
+    then do
+      bytes <- File.readUtf8 (root </> ".whiletruu_elmls.json")
+
+      case Json.Decode.fromByteString inputsDecoder bytes of
+        Right inputs ->
+          pure inputs
+        Left _ ->
+          pure []
+    else
+      pure []
+
+
+inputsDecoder :: Json.Decode.Decoder x [FilePath]
+inputsDecoder =
+  Json.Decode.field "inputs" 
+    (Json.Decode.list 
+      (fmap Json.String.toChars Json.Decode.string)
+    )
+
+    
 
 rawModuleNameToPackagePath :: FilePath -> ModuleName.Raw -> FilePath
 rawModuleNameToPackagePath root modul =

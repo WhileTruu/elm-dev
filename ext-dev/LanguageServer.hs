@@ -870,10 +870,29 @@ recompile (State mProjects) changedFile = do
           let diff = List.filter (\a -> List.notElem a publishedDiagnosticsFiles)
                       prevPublishedDiagnosticsFiles 
 
-          mapM_ (\a -> publishReportDiagnostic a []) diff
+          mapM_ (\a -> publishReportDiagnostic a 1 []) diff
 
           cacheUpdatePrevPublishedDiagnosticsFiles cache (\_ -> publishedDiagnosticsFiles)
           cacheUpdatePublishedDiagnosticsFiles cache (\_ -> [])
+
+          sendNotification "window/logMessage"
+                (Aeson.object
+                  [ "type" Aeson..= (1 :: Int)
+                  , "message" Aeson..= ("prev: " <> show prevPublishedDiagnosticsFiles)
+                  ]
+                )
+          sendNotification "window/logMessage"
+                (Aeson.object
+                  [ "type" Aeson..= (1 :: Int)
+                  , "message" Aeson..= ("curr: " <> show publishedDiagnosticsFiles)
+                  ]
+                )
+          sendNotification "window/logMessage"
+                (Aeson.object
+                  [ "type" Aeson..= (1 :: Int)
+                  , "message" Aeson..= ("diff: " <> show diff)
+                  ]
+                )
 
           pure ()
         )
@@ -910,7 +929,7 @@ recompileFile top remain projCache@(ProjectCache proj@(Ext.Dev.Project.Project r
               case warnings of
                 Nothing -> pure ()
                 Just (sourceMod, warns) -> do
-                  publishReportDiagnostic path $
+                  publishReportDiagnostic path 2 $
                     map
                       (Reporting.Warning.toReport
                         (Reporting.Render.Type.Localizer.fromModule sourceMod)
@@ -929,7 +948,7 @@ recompileFile top remain projCache@(ProjectCache proj@(Ext.Dev.Project.Project r
             ExitHelp.CompilerReport filePath e es ->
               mapM_
                 (\(Reporting.Error.Module name path _ source err) -> do
-                  publishReportDiagnostic path 
+                  publishReportDiagnostic path 1 
                     $ NE.toList 
                     $ Reporting.Error.toReports (Code.toSource source) err
 
@@ -945,8 +964,8 @@ recompileFile top remain projCache@(ProjectCache proj@(Ext.Dev.Project.Project r
                   ]
                 )
 
-publishReportDiagnostic :: FilePath -> [Report.Report] -> IO ()
-publishReportDiagnostic filePath reports =
+publishReportDiagnostic :: FilePath -> Int -> [Report.Report] -> IO ()
+publishReportDiagnostic filePath severity reports =
   sendNotification "textDocument/publishDiagnostics"
     (Aeson.object
       [ "uri" Aeson..= ("file://" ++ filePath :: String)
@@ -963,7 +982,7 @@ publishReportDiagnostic filePath reports =
                 , "character" Aeson..= (ec - 1)
                 ]
               ]
-            , "severity" Aeson..= (1 :: Int)
+            , "severity" Aeson..= (severity :: Int)
             , "message" Aeson..= (title ++ "\n\n" ++ Reporting.Doc.toString message :: String)
             ]
         )
