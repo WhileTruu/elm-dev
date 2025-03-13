@@ -1,3 +1,8 @@
+
+# Wishlist for the language server
+
+- [ ] [telescope.builtin.lsp_*]: server does not support textDocument/documentSymbol
+
 # Elm Dev
 
 Elm Dev is a version of the Elm compiler that is made to support editing tools.

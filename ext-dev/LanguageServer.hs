@@ -21,6 +21,7 @@ import Data.Maybe as Maybe
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Encoding.Error as Aeson
+import qualified Data.Name as Name
 import qualified Data.Text.Lazy.Builder as TB
 import qualified Data.Text.Lazy.IO as TIO
 import qualified Develop.Generate.Help
@@ -220,6 +221,7 @@ data Request
     }
   | Exit
   | Initialized
+  | DocumentSymbol {reqId :: Int, filePath :: FilePath}
   | DidSave {filePath :: FilePath}
   | DidOpen {filePath :: FilePath}
   deriving (Show, Generics.Generic)
@@ -281,6 +283,16 @@ instance Aeson.FromJSON Request where
           <$> v .: "id"
           <*> pure filePath
           <*> pure (Ann.Position (row + 1) (col + 1))
+      "textDocument/documentSymbol" -> do
+        params <- v .: "params"
+
+        textDocument <- params .: "textDocument"
+        uri <- textDocument .: "uri"
+        let filePath = drop 7 uri
+
+        DocumentSymbol
+          <$> v .: "id"
+          <*> pure filePath
 
       "textDocument/didSave" -> do
         params <- v .: "params"
@@ -311,6 +323,7 @@ handleRequest state@(State mProjects) request =
         Aeson.object
           [ "capabilities" Aeson..= Aeson.object
             [ "definitionProvider" Aeson..= Aeson.object []
+            , "documentSymbolProvider" Aeson..= True
             , "textDocumentSync" Aeson..= Aeson.object
                 [ "save" Aeson..= True
                 , "openClose" Aeson..= True
@@ -425,7 +438,23 @@ handleRequest state@(State mProjects) request =
             )
           & Aeson.toJSON
         )
+    DocumentSymbol {reqId = reqId, filePath = filePath} -> do
+      sendCreateWorkDoneProgress "document-symbols-progress"
+      sendProgressBegin "document-symbols-progress" "🔍 Finding symbols"
 
+      root <- fmap (Maybe.fromMaybe ".") (getRoot filePath state)
+      result <- Ext.CompileProxy.parse root filePath 
+
+      sendProgressEnd "document-symbols-progress"
+
+      case result of
+        Right srcModule -> do
+          let founds = Ext.Dev.Find.Source.symbols srcModule
+          let encoded = Ext.Dev.Find.Source.encodeFoundSymbols founds
+
+          respond reqId encoded
+
+        Left _ -> pure ()
 
     DidSave {filePath = filePath} -> do
       sendCreateWorkDoneProgress "compile-progress"
@@ -443,6 +472,17 @@ handleRequest state@(State mProjects) request =
 
       sendProgressEnd "compile-progress"
 
+encodeRange (Ann.Region (Ann.Position sr sc) (Ann.Position er ec)) = 
+  Aeson.object
+    [ "start" Aeson..= Aeson.object
+      [ "line" Aeson..= (sr - 1)
+      , "character" Aeson..= (sc - 1)
+      ]
+    , "end" Aeson..= Aeson.object
+      [ "line" Aeson..= (er - 1)
+      , "character" Aeson..= (ec - 1)
+      ]
+    ]
 
 -- TODO: Move Find IO stuff to Find module
 findDefinition :: FilePath -> Watchtower.Editor.PointLocation -> IO (Maybe (FilePath, Ann.Region))

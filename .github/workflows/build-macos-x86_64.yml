@@ -27,7 +27,7 @@ jobs:
         env:
             DATE: ${{ env.DATE }}
             SHA: ${{ env.SHA }}
-        run: echo "BUILD_FOLDER_NAME=elm-dev-macos_apple_silicon-$DATE-$SHA" >> $GITHUB_ENV
+        run: echo "BUILD_FOLDER_NAME=elm-dev-macos_x86_64-$DATE-$SHA" >> $GITHUB_ENV
 
       - name: build release
         run: stack install --local-bin-path ${{ env.BUILD_FOLDER_NAME }}

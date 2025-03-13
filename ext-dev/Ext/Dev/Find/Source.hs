@@ -7,6 +7,8 @@ module Ext.Dev.Find.Source
   , potentialImportSourcesForName
   , importsForQual
   , references
+  , symbols
+  , encodeFoundSymbols
   )
 where
 
@@ -26,6 +28,12 @@ import qualified Data.Maybe as Maybe
 import Debug.Trace (traceShow)
 import qualified Elm.ModuleName as ModuleName
 import Data.Word (Word16)
+
+import Data.Aeson ((.:))
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Types as AesonTypes
+import qualified Data.Text.Encoding.Error as Aeson
+
 
 data Found
     = FoundValue (Maybe Def) (A.Located Src.Value)
@@ -1039,4 +1047,116 @@ localNamedInType name foundRegions (A.At region type_) =
         Src.TRecord fields extRecord -> List.foldl (localNamedInType name) foundRegions (map snd fields)
         Src.TUnit -> foundRegions
         Src.TTuple a b rest -> List.foldl (localNamedInType name) (localNamedInType name (localNamedInType name foundRegions b) a) rest
+
+-- Symbols
+
+
+symbols :: Src.Module -> [Found]
+symbols srcMod@(Src.Module name exports docs imports values unions aliases infixes effects) =
+    List.concatMap (symbolsInValue srcMod) values
+        ++ List.concatMap (symbolsInUnion srcMod) unions
+        ++ List.concatMap (symbolsInAlias srcMod) aliases
+
+
+symbolsInValue :: Src.Module -> A.Located Src.Value -> [Found]
+symbolsInValue srcMod locatedValue@(A.At _ value) =
+    [ FoundValue Nothing locatedValue
+    ]
+
+symbolsInUnion :: Src.Module -> A.Located Src.Union -> [Found]
+symbolsInUnion srcMod locatedUnion@(A.At _ (Src.Union _ _ vars)) =
+    FoundUnion Nothing locatedUnion
+        : map (\(name, _) -> FoundCtor name) vars 
+
+symbolsInAlias :: Src.Module -> A.Located Src.Alias -> [Found]
+symbolsInAlias srcMod locatedAlias@(A.At _ alias) =
+    [ FoundAlias Nothing locatedAlias
+    ]
+
+encodeFoundSymbols :: [Found] -> Aeson.Value
+encodeFoundSymbols founds =
+    founds 
+        & List.sortBy (\a b -> 
+            case (foundRegion a, foundRegion b) of
+                (Just (A.Region (A.Position a1 _) _), Just (A.Region (A.Position b1 _) _)) -> 
+                    compare a1 b1
+
+                (Just aRegion, Nothing)  -> LT
+                (Nothing, Just aRegion)  -> GT
+                (Nothing, Nothing)  -> GT
+          )
+        & Maybe.mapMaybe encodeFoundSymbol
+        & Aeson.toJSON
+
+foundRegion :: Found -> Maybe A.Region 
+foundRegion found =
+  case found of
+    FoundValue _ value@(A.At region _) -> Just region
+    FoundUnion _ union@(A.At region _) -> Just region
+    FoundAlias _ (A.At region (Src.Alias (A.At nameRegion name) _ _)) -> Just region
+    FoundCtor (A.At region _) -> Just region
+    FoundTVar (A.At region _) -> Just region
+    FoundPattern (A.At region _) -> Just region
+    FoundDef (Src.Define (A.At region _) _ _ _) -> Just region
+    FoundDef (Src.Destruct (A.At region _) _) -> Just region
+    FoundExternalOpts _ _ -> Nothing
+    FoundImport _ -> Nothing
+ 
+encodeFoundSymbol :: Found -> Maybe Aeson.Value
+encodeFoundSymbol found =
+  case found of
+    FoundValue _ value@(A.At region (Src.Value (A.At nameRegion name) patterns_ expr_ maybeType_)) ->
+      Aeson.object
+        [ "name" Aeson..= (Name.toChars name :: String)
+        , "range" Aeson..= encodeRange region
+        , "selectionRange" Aeson..= encodeRange nameRegion
+        , "kind" Aeson..= (12 :: Int)
+        ]
+        & Just
+
+    FoundUnion _ union@(A.At region (Src.Union (A.At nameRegion name) _ _)) ->
+      Aeson.object
+        [ "name" Aeson..= (Name.toChars name :: String)
+        , "range" Aeson..= encodeRange region
+        , "selectionRange" Aeson..= encodeRange nameRegion
+        , "kind" Aeson..= (10 :: Int)
+        ]
+        & Just
+
+    FoundAlias _ (A.At region (Src.Alias (A.At nameRegion name) _ _)) ->
+      Aeson.object
+        [ "name" Aeson..= (Name.toChars name :: String)
+        , "range" Aeson..= encodeRange region
+        , "selectionRange" Aeson..= encodeRange nameRegion
+        , "kind" Aeson..= (23 :: Int)
+        ]
+        & Just
+
+    FoundCtor (A.At region name) -> 
+      Aeson.object
+        [ "name" Aeson..= (Name.toChars name :: String)
+        , "range" Aeson..= encodeRange region
+        , "selectionRange" Aeson..= encodeRange region
+        , "kind" Aeson..= (22 :: Int)
+        ]
+        & Just
+
+    FoundTVar _ -> Nothing
+    FoundPattern _ -> Nothing
+    FoundDef _ -> Nothing
+    FoundExternalOpts _ _ -> Nothing
+    FoundImport _ -> Nothing
+
+
+encodeRange (A.Region (A.Position sr sc) (A.Position er ec)) = 
+  Aeson.object
+    [ "start" Aeson..= Aeson.object
+      [ "line" Aeson..= (sr - 1)
+      , "character" Aeson..= (sc - 1)
+      ]
+    , "end" Aeson..= Aeson.object
+      [ "line" Aeson..= (er - 1)
+      , "character" Aeson..= (ec - 1)
+      ]
+    ]
 
