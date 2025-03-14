@@ -8,7 +8,7 @@ module Ext.Dev.Find.Source
   , importsForQual
   , references
   , symbols
-  , encodeFoundSymbols
+  , encodeFoundAsLspDocumentSymbols
   )
 where
 
@@ -1073,8 +1073,8 @@ symbolsInAlias srcMod locatedAlias@(A.At _ alias) =
     [ FoundAlias Nothing locatedAlias
     ]
 
-encodeFoundSymbols :: [Found] -> Aeson.Value
-encodeFoundSymbols founds =
+encodeFoundAsLspDocumentSymbols :: [Found] -> Aeson.Value
+encodeFoundAsLspDocumentSymbols founds =
     founds 
         & List.sortBy (\a b -> 
             case (foundRegion a, foundRegion b) of
@@ -1085,8 +1085,9 @@ encodeFoundSymbols founds =
                 (Nothing, Just aRegion)  -> GT
                 (Nothing, Nothing)  -> GT
           )
-        & Maybe.mapMaybe encodeFoundSymbol
+        & Maybe.mapMaybe encodeFoundAsLspDocumentSymbol
         & Aeson.toJSON
+
 
 foundRegion :: Found -> Maybe A.Region 
 foundRegion found =
@@ -1101,15 +1102,16 @@ foundRegion found =
     FoundDef (Src.Destruct (A.At region _) _) -> Just region
     FoundExternalOpts _ _ -> Nothing
     FoundImport _ -> Nothing
- 
-encodeFoundSymbol :: Found -> Maybe Aeson.Value
-encodeFoundSymbol found =
+
+
+encodeFoundAsLspDocumentSymbol :: Found -> Maybe Aeson.Value
+encodeFoundAsLspDocumentSymbol found =
   case found of
     FoundValue _ value@(A.At region (Src.Value (A.At nameRegion name) patterns_ expr_ maybeType_)) ->
       Aeson.object
         [ "name" Aeson..= (Name.toChars name :: String)
-        , "range" Aeson..= encodeRange region
-        , "selectionRange" Aeson..= encodeRange nameRegion
+        , "range" Aeson..= encodeRegionAsLspRange region
+        , "selectionRange" Aeson..= encodeRegionAsLspRange nameRegion
         , "kind" Aeson..= (12 :: Int)
         ]
         & Just
@@ -1117,8 +1119,8 @@ encodeFoundSymbol found =
     FoundUnion _ union@(A.At region (Src.Union (A.At nameRegion name) _ _)) ->
       Aeson.object
         [ "name" Aeson..= (Name.toChars name :: String)
-        , "range" Aeson..= encodeRange region
-        , "selectionRange" Aeson..= encodeRange nameRegion
+        , "range" Aeson..= encodeRegionAsLspRange region
+        , "selectionRange" Aeson..= encodeRegionAsLspRange nameRegion
         , "kind" Aeson..= (10 :: Int)
         ]
         & Just
@@ -1126,8 +1128,8 @@ encodeFoundSymbol found =
     FoundAlias _ (A.At region (Src.Alias (A.At nameRegion name) _ _)) ->
       Aeson.object
         [ "name" Aeson..= (Name.toChars name :: String)
-        , "range" Aeson..= encodeRange region
-        , "selectionRange" Aeson..= encodeRange nameRegion
+        , "range" Aeson..= encodeRegionAsLspRange region
+        , "selectionRange" Aeson..= encodeRegionAsLspRange nameRegion
         , "kind" Aeson..= (23 :: Int)
         ]
         & Just
@@ -1135,8 +1137,8 @@ encodeFoundSymbol found =
     FoundCtor (A.At region name) -> 
       Aeson.object
         [ "name" Aeson..= (Name.toChars name :: String)
-        , "range" Aeson..= encodeRange region
-        , "selectionRange" Aeson..= encodeRange region
+        , "range" Aeson..= encodeRegionAsLspRange region
+        , "selectionRange" Aeson..= encodeRegionAsLspRange region
         , "kind" Aeson..= (22 :: Int)
         ]
         & Just
@@ -1148,7 +1150,8 @@ encodeFoundSymbol found =
     FoundImport _ -> Nothing
 
 
-encodeRange (A.Region (A.Position sr sc) (A.Position er ec)) = 
+encodeRegionAsLspRange :: A.Region -> Aeson.Value
+encodeRegionAsLspRange (A.Region (A.Position sr sc) (A.Position er ec)) = 
   Aeson.object
     [ "start" Aeson..= Aeson.object
       [ "line" Aeson..= (sr - 1)

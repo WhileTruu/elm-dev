@@ -445,16 +445,16 @@ handleRequest state@(State mProjects) request =
       root <- fmap (Maybe.fromMaybe ".") (getRoot filePath state)
       result <- Ext.CompileProxy.parse root filePath 
 
-      sendProgressEnd "document-symbols-progress"
 
       case result of
         Right srcModule -> do
           let founds = Ext.Dev.Find.Source.symbols srcModule
-          let encoded = Ext.Dev.Find.Source.encodeFoundSymbols founds
 
-          respond reqId encoded
+          respond reqId $ Ext.Dev.Find.Source.encodeFoundAsLspDocumentSymbols founds
 
         Left _ -> pure ()
+
+      sendProgressEnd "document-symbols-progress"
 
     DidSave {filePath = filePath} -> do
       sendCreateWorkDoneProgress "compile-progress"
@@ -472,17 +472,6 @@ handleRequest state@(State mProjects) request =
 
       sendProgressEnd "compile-progress"
 
-encodeRange (Ann.Region (Ann.Position sr sc) (Ann.Position er ec)) = 
-  Aeson.object
-    [ "start" Aeson..= Aeson.object
-      [ "line" Aeson..= (sr - 1)
-      , "character" Aeson..= (sc - 1)
-      ]
-    , "end" Aeson..= Aeson.object
-      [ "line" Aeson..= (er - 1)
-      , "character" Aeson..= (ec - 1)
-      ]
-    ]
 
 -- TODO: Move Find IO stuff to Find module
 findDefinition :: FilePath -> Watchtower.Editor.PointLocation -> IO (Maybe (FilePath, Ann.Region))
