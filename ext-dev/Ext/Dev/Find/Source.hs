@@ -9,6 +9,7 @@ module Ext.Dev.Find.Source
   , references
   , symbols
   , encodeFoundAsLspDocumentSymbols
+  , foundRegion
   )
 where
 
@@ -43,8 +44,9 @@ data Found
     | FoundCtor (A.Located Name)
     | FoundPattern Src.Pattern
     | FoundDef Src.Def
-    | FoundExternalOpts [Src.Import] Name
+    | FoundExternalOpts [Src.Import] Name -- FIXME: remove, because it's not really found here yet?
     | FoundImport Src.Import
+    | FoundModuleName (A.Located Name)
     deriving (Show)
 
 
@@ -79,6 +81,9 @@ withCanonical (Can.Module name exports docs decls unions aliases binops effects)
             found
 
         FoundExternalOpts _ _ ->
+            found
+
+        FoundModuleName _ ->
             found
 
         FoundImport _ ->
@@ -122,12 +127,17 @@ definitionNamed valueName (Src.Module name exports docs imports values unions al
         <|> find (withName valueName toAliasName (FoundAlias Nothing)) aliases
 
 
+importNamed :: Name -> (A.Located Name -> Found) -> Src.Import -> Maybe Found
+importNamed name toResult import_@(Src.Import value _ _) =
+    withName name id toResult value
+
+
 ctorNamed :: Name -> (A.Located Name -> Found) -> A.Located Src.Union -> Maybe Found
 ctorNamed name toResult (A.At unionRegion (Src.Union _ _ ctors)) =
     find (withName name id toResult) (map fst ctors)
 
 
-withName :: Name -> (a -> Name) ->  (A.Located a -> Found) ->  A.Located a -> Maybe Found
+withName :: Name -> (a -> Name) ->  (A.Located a -> Found) -> A.Located a -> Maybe Found
 withName name getName toFound locatedItem@(A.At _ val) =
     if name == getName val then
         Just (toFound locatedItem)
@@ -149,8 +159,15 @@ toAliasName (Src.Alias (A.At _ name) _ _) =
 
 
 definitionAtPoint :: Watchtower.Editor.PointLocation -> Src.Module -> Maybe Found
-definitionAtPoint point srcMod@(Src.Module name exports docs imports values unions aliases infixes effects) =
-    typeAtPoint point srcMod
+definitionAtPoint point@(Watchtower.Editor.PointLocation _ point_) srcMod@(Src.Module name exports docs imports values unions aliases infixes effects) =
+    (name >>= (\a ->
+        if withinRegion point_ (A.toRegion a) then
+            Just (FoundModuleName a)
+
+        else
+            Nothing
+    ))
+        <|> typeAtPoint point srcMod
         <|> varAtPoint point srcMod
         <|> find (unionCtorAtPoint point) unions
         <|> find (importAtPoint point) imports
@@ -224,12 +241,39 @@ find toResult =
 
 
 importAtPoint :: Watchtower.Editor.PointLocation -> Src.Import -> Maybe Found
-importAtPoint (Watchtower.Editor.PointLocation _ point) import_@(Src.Import (A.At region _) alias _) =
+importAtPoint (Watchtower.Editor.PointLocation _ point) import_@(Src.Import (A.At region _) alias exposing) =
     if withinRegion point region || maybe False (withinRegion point . A.toRegion) alias then
         Just (FoundImport import_)
 
     else
-        Nothing
+        case exposing of
+            Src.Open ->
+                Nothing
+
+            Src.Explicit exposed ->
+                find (\a ->
+                    case a of
+                        Src.Upper name _ ->
+                            if withinRegion point (A.toRegion name) then
+                                Just (FoundExternalOpts [import_] (A.toValue name))
+
+                            else
+                                Nothing
+
+                        Src.Lower name ->
+                            if withinRegion point (A.toRegion name) then
+                                Just (FoundExternalOpts [import_] (A.toValue name))
+
+                            else
+                                Nothing
+
+                        Src.Operator region name ->
+                            if withinRegion point region then
+                                Just (FoundExternalOpts [import_] name)
+
+                            else
+                                Nothing
+                ) exposed
 
 
 exportAtPoint :: Watchtower.Editor.PointLocation -> Src.Module -> A.Located Src.Exposing -> Maybe Found
@@ -666,7 +710,7 @@ references moduleName name srcMod = do
 referenceNamed :: Src.Import -> Name -> Src.Module -> [A.Region]
 referenceNamed import_ name srcMod@(Src.Module _ _ _ imports values _ _ _ _) =
     List.concatMap (namedInValue import_ name) values
-        -- FIXME Find references in unions and aliases (binops?)
+        -- FIXME: Find references in unions and aliases (binops?)
 
 
 namedInValue :: Src.Import -> Name -> A.Located Src.Value -> [A.Region]
@@ -1092,16 +1136,17 @@ encodeFoundAsLspDocumentSymbols founds =
 foundRegion :: Found -> Maybe A.Region 
 foundRegion found =
   case found of
-    FoundValue _ value@(A.At region _) -> Just region
-    FoundUnion _ union@(A.At region _) -> Just region
-    FoundAlias _ (A.At region (Src.Alias (A.At nameRegion name) _ _)) -> Just region
+    FoundValue _ (A.At region _) -> Just region
+    FoundUnion _ (A.At _ (Src.Union (A.At region _) _ _)) -> Just region
+    FoundAlias _ (A.At _ (Src.Alias (A.At region _) _ _)) -> Just region
     FoundCtor (A.At region _) -> Just region
     FoundTVar (A.At region _) -> Just region
     FoundPattern (A.At region _) -> Just region
     FoundDef (Src.Define (A.At region _) _ _ _) -> Just region
     FoundDef (Src.Destruct (A.At region _) _) -> Just region
     FoundExternalOpts _ _ -> Nothing
-    FoundImport _ -> Nothing
+    FoundImport (Src.Import (A.At region _) _ _) -> Just region
+    FoundModuleName (A.At region _) -> Just region
 
 
 encodeFoundAsLspDocumentSymbol :: Found -> Maybe Aeson.Value
@@ -1148,6 +1193,7 @@ encodeFoundAsLspDocumentSymbol found =
     FoundDef _ -> Nothing
     FoundExternalOpts _ _ -> Nothing
     FoundImport _ -> Nothing
+    FoundModuleName _ -> Nothing
 
 
 encodeRegionAsLspRange :: A.Region -> Aeson.Value

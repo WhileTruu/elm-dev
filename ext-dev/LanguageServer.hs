@@ -57,6 +57,7 @@ import qualified Ext.Dev
 import qualified Reporting.Render.Type.Localizer
 import qualified Ext.CompileProxy
 import qualified Ext.CompileHelpers.Disk
+import qualified Reporting.Report
 import qualified Reporting.Exit as Exit
 import qualified Reporting.Exit.Help as ExitHelp
 import qualified Reporting.Error
@@ -361,16 +362,11 @@ handleRequest state@(State mProjects) request =
       respond idValue Aeson.Null
       System.Exit.exitSuccess
 
-    Exit -> do
+    Exit ->
       System.Exit.exitSuccess
 
-    Initialized -> do
-      sendNotification "window/showMessage"
-        (Aeson.object
-          [ "type" Aeson..= (3 :: Int)
-          , "message" Aeson..= ("Initialized." :: String)
-          ]
-        )
+    Initialized ->
+      showMessage MessageTypeInfo "Initialized."
 
     Definition {reqId = reqId, filePath = path , position = position} -> do
       sendCreateWorkDoneProgress "go-to-definition-progress"
@@ -381,7 +377,7 @@ handleRequest state@(State mProjects) request =
 
       pathAndPos <- findDefinition root location
 
-      case pathAndPos of
+      case pathAndPos >>= (\(path, _, found) -> Ext.Dev.Find.Source.foundRegion found & fmap (\a -> (path, a)) ) of
         Nothing -> do
           sendProgressEnd "go-to-definition-progress"
           respondErr reqId "Definition not found"
@@ -473,105 +469,82 @@ handleRequest state@(State mProjects) request =
       sendProgressEnd "compile-progress"
 
 
--- TODO: Move Find IO stuff to Find module
-findDefinition :: FilePath -> Watchtower.Editor.PointLocation -> IO (Maybe (FilePath, Ann.Region))
+findDefinition :: FilePath -> Watchtower.Editor.PointLocation -> IO (Maybe (FilePath, ModuleName.Raw, Ext.Dev.Find.Source.Found))
 findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
     result <- Ext.CompileProxy.parse root path
 
     case result of
       Right srcModule -> do
-          let
-              found =
-                  Ext.Dev.Find.Source.definitionAtPoint point srcModule
+          case Ext.Dev.Find.Source.definitionAtPoint point srcModule of
+            Nothing -> pure Nothing
 
-          case found of
-            Nothing ->
-                pure Nothing
+            Just found@(Ext.Dev.Find.Source.FoundExternalOpts imports name) ->
+              Control.Monad.foldM
+                  (\acc mod ->
+                   case acc of
+                       Nothing -> findExternal root mod name
+                       found -> pure found
+                  )
+                  Nothing
+                  imports
 
-            Just (Ext.Dev.Find.Source.FoundValue _ (Ann.At _ (Src.Value name _ _ _))) ->
-                pure (Just (path, Ann.toRegion name))
 
-            Just (Ext.Dev.Find.Source.FoundUnion _ (Ann.At region (Src.Union name _ _ ))) ->
-                pure (Just (path, Ann.toRegion name))
-
-            Just (Ext.Dev.Find.Source.FoundAlias _ (Ann.At region (Src.Alias name _ _))) ->
-                pure (Just (path, Ann.toRegion name))
-
-            Just (Ext.Dev.Find.Source.FoundTVar (Ann.At region _)) ->
-                pure (Just (path, region))
-
-            Just (Ext.Dev.Find.Source.FoundCtor (Ann.At region _)) ->
-                pure (Just (path, region))
-
-            Just (Ext.Dev.Find.Source.FoundDef (Src.Define (Ann.At region _) _ _ _)) ->
-                pure (Just (path, region))
-
-            Just (Ext.Dev.Find.Source.FoundDef (Src.Destruct (Ann.At region _) _)) ->
-                pure (Just (path, region))
-
-            Just (Ext.Dev.Find.Source.FoundPattern (Ann.At region _)) ->
-                pure (Just (path, region))
-
-            Just (Ext.Dev.Find.Source.FoundExternalOpts imports name) -> do
-                fun <-
-                    Control.Monad.foldM
-                        (\acc mod ->
-                         case acc of
-                             Nothing ->
-                                 findExternal root mod name
-
-                             found ->
-                                 pure found
-                        )
-                        Nothing
-                        imports
-
-                case fun of
-                    Just (extPath, Ext.Dev.Find.Source.FoundValue _ (Ann.At region _)) ->
-                        pure (Just (extPath, region))
-
-                    Just (extPath, Ext.Dev.Find.Source.FoundUnion _ (Ann.At region _)) ->
-                        pure (Just (extPath, region))
-
-                    Just (extPath, Ext.Dev.Find.Source.FoundAlias _ (Ann.At region _)) ->
-                        pure (Just (extPath, region))
-
-                    Just (extPath, Ext.Dev.Find.Source.FoundCtor (Ann.At region _)) ->
-                        pure (Just (extPath, region))
-
-                    _ ->
-                        pure Nothing
-            Just (Ext.Dev.Find.Source.FoundImport (Src.Import (Ann.At _ mod) _ _)) -> do
+            Just found@(Ext.Dev.Find.Source.FoundImport (Src.Import (Ann.At _ mod) _ _)) -> do
                   details <- Ext.CompileProxy.loadProject root
 
                   case Ext.Dev.Project.lookupModulePath details mod of
-                      Nothing -> do
-                          case Ext.Dev.Project.lookupPkgName details mod of
-                              Nothing ->
-                                  pure Nothing
+                    Nothing -> do
+                      case Ext.Dev.Project.lookupPkgName details mod of
+                        Nothing -> pure Nothing
+                        Just pkgName -> do
+                          maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
 
-                              Just pkgName -> do
-                                  maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
+                          case maybeCurrentVersion of
+                            Nothing -> pure Nothing
 
-                                  case maybeCurrentVersion of
-                                      Nothing ->
-                                          pure Nothing
+                            Just version -> do
+                                packageCache <- Stuff.getPackageCache
+                                let home = Stuff.package packageCache pkgName version
+                                let path = home Path.</> "src" Path.</> ModuleName.toFilePath mod Path.<.>"elm"
 
-                                      Just version -> do
-                                          packageCache <- Stuff.getPackageCache
-                                          let home = Stuff.package packageCache pkgName version
-                                          let path = home Path.</> "src" Path.</> ModuleName.toFilePath mod Path.<.>"elm"
+                                loadedFile <- Ext.CompileProxy.loadPkgFileSource pkgName home path
 
-                                          pure (Just (path, Ann.one))
+                                pure $ case loadedFile of
+                                    Left _ -> Nothing
+                                    Right (_, modul@(Src.Module maybeName _ _ _ _ _ _ _ _)) ->
+                                      case maybeName of
+                                        Just name -> 
+                                            ( path
+                                            , Src.getName modul
+                                            , Ext.Dev.Find.Source.FoundModuleName name
+                                            )
+                                            & Just
 
-                      Just path ->
-                          pure (Just (path, Ann.one))
+                                        Nothing -> Nothing
+
+                    Just path -> do
+                      loadedFile <- Ext.CompileProxy.parse root path
+                      pure $ case loadedFile of
+                        Left _ -> Nothing
+                        Right modul@(Src.Module maybeName _ _ _ _ _ _ _ _) ->
+                          case maybeName of
+                            Just name -> 
+                              Just 
+                                ( path
+                                , Src.getName modul
+                                , Ext.Dev.Find.Source.FoundModuleName name
+                                )
+
+                            Nothing -> Nothing
+
+            Just found -> do
+              pure (Just (path, Src.getName srcModule, found))
 
       Left _  ->
           pure Nothing
 
 
-findExternal :: FilePath -> Src.Import -> Name -> IO (Maybe (FilePath, Ext.Dev.Find.Source.Found))
+findExternal :: FilePath -> Src.Import -> Name -> IO (Maybe (FilePath, ModuleName.Raw, Ext.Dev.Find.Source.Found))
 findExternal root (Src.Import (Ann.At _ mod) _ _) name = do
     details <- Ext.CompileProxy.loadProject root
 
@@ -585,8 +558,7 @@ findExternal root (Src.Import (Ann.At _ mod) _ _) name = do
                     maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
 
                     case maybeCurrentVersion of
-                        Nothing ->
-                            pure Nothing
+                        Nothing -> pure Nothing
 
                         Just version -> do
                             packageCache <- Stuff.getPackageCache
@@ -595,13 +567,18 @@ findExternal root (Src.Import (Ann.At _ mod) _ _) name = do
                             loadedFile <- Ext.CompileProxy.loadPkgFileSource pkgName home path
 
                             case loadedFile of
-                                Left err ->
+                                Left err -> do
+                                    source <- File.readUtf8 path
+                                    showMessage MessageTypeError (ExitHelp.toString (Reporting.Report._message (Reporting.Error.Syntax.toReport (Code.toSource source) err)))
                                     pure Nothing
 
-                                Right (_, source) ->
-                                    Ext.Dev.Find.Source.definitionNamed name source
-                                        & fmap (\found -> (path, found))
-                                        & pure
+                                Right (_, source) -> do
+                                    case Ext.Dev.Find.Source.definitionNamed name source of
+                                        Just found -> do 
+                                          pure $ Just ( path, Src.getName source, found)
+
+                                        Nothing -> do
+                                          pure Nothing
 
         Just path -> do
             loadedFile <- Ext.CompileProxy.parse root path
@@ -612,215 +589,85 @@ findExternal root (Src.Import (Ann.At _ mod) _ _) name = do
 
                 Right source ->
                     Ext.Dev.Find.Source.definitionNamed name source
-                        & fmap (\found -> (path, found))
+                        & fmap (\found -> (path, Src.getName source, found))
                         & pure
-
-
-data Found
-    = FoundValue ModuleName.Raw (Ann.Located Src.Value)
-    | FoundUnion ModuleName.Raw (Ann.Located Src.Union)
-    | FoundAlias ModuleName.Raw (Ann.Located Src.Alias)
-    | FoundCtor ModuleName.Raw (Ann.Located Name)
-    | FoundModule ModuleName.Raw
-
-
-findDefinition2 :: FilePath -> Watchtower.Editor.PointLocation -> IO (Maybe Found)
-findDefinition2 root point@(Watchtower.Editor.PointLocation path _) = do
-    result <- Ext.CompileProxy.parse root path
-
-    case result of
-      Right srcModule -> do
-          let
-              found =
-                  Ext.Dev.Find.Source.definitionAtPoint point srcModule
-
-          case found of
-            Nothing ->
-                pure Nothing
-
-            Just (Ext.Dev.Find.Source.FoundValue _ value) ->
-                pure (Just (FoundValue (Src.getName srcModule) value))
-
-            Just (Ext.Dev.Find.Source.FoundUnion _ union) ->
-                pure (Just (FoundUnion (Src.getName srcModule) union))
-
-            Just (Ext.Dev.Find.Source.FoundAlias _ alias) ->
-                pure (Just (FoundAlias (Src.getName srcModule) alias))
-
-            Just (Ext.Dev.Find.Source.FoundTVar _) ->
-                pure Nothing
-
-            Just (Ext.Dev.Find.Source.FoundCtor name) ->
-                pure (Just (FoundCtor (Src.getName srcModule) name))
-
-            Just (Ext.Dev.Find.Source.FoundDef _) ->
-                pure Nothing
-
-            Just (Ext.Dev.Find.Source.FoundPattern _) ->
-                pure Nothing
-
-            Just (Ext.Dev.Find.Source.FoundExternalOpts imports name) -> do
-                Control.Monad.foldM
-                    (\acc mod ->
-                     case acc of
-                         Nothing ->
-                             findExternal2 root mod name
-
-                         found ->
-                             pure found
-                    )
-                    Nothing
-                    imports
-
-            Just (Ext.Dev.Find.Source.FoundImport import_) -> do
-                pure (Just (FoundModule (Src.getImportName import_)))
-
-      Left _  ->
-          pure Nothing
-
-
-findExternal2 :: FilePath -> Src.Import -> Name -> IO (Maybe Found)
-findExternal2 root (Src.Import (Ann.At _ mod) _ _) name = do
-    details <- Ext.CompileProxy.loadProject root
-
-    case Ext.Dev.Project.lookupModulePath details mod of
-        Nothing -> do
-            case Ext.Dev.Project.lookupPkgName details mod of
-                Nothing ->
-                    pure Nothing
-
-                Just pkgName -> do
-                    maybeCurrentVersion <- Ext.Dev.Package.getCurrentlyUsedOrLatestVersion "." pkgName
-
-                    case maybeCurrentVersion of
-                        Nothing ->
-                            pure Nothing
-
-                        Just version -> do
-                            packageCache <- Stuff.getPackageCache
-                            let home = Stuff.package packageCache pkgName version
-                            let path = home Path.</> "src" Path.</> ModuleName.toFilePath mod Path.<.>"elm"
-                            loadedFile <- Ext.CompileProxy.loadPkgFileSource pkgName home path
-
-                            case loadedFile of
-                                Left err ->
-                                    pure Nothing
-
-                                Right (_, source) ->
-                                    (Ext.Dev.Find.Source.definitionNamed name source
-                                        >>= toYolo mod
-                                    )
-                                        & pure
-
-        Just path -> do
-            loadedFile <- Ext.CompileProxy.parse root path
-
-            case loadedFile of
-                Left _ ->
-                    pure Nothing
-
-                Right source ->
-                    (Ext.Dev.Find.Source.definitionNamed name source
-                        >>= toYolo mod
-                    )
-                        & pure
-
-
-    where
-        toYolo mod fun =
-            case fun of
-                Ext.Dev.Find.Source.FoundValue _ value ->
-                    Just (FoundValue mod value)
-
-                Ext.Dev.Find.Source.FoundUnion _ union ->
-                    Just (FoundUnion mod union)
-
-                Ext.Dev.Find.Source.FoundAlias _ alias ->
-                    Just (FoundAlias mod alias)
-
-                Ext.Dev.Find.Source.FoundCtor name ->
-                    Just (FoundCtor mod name)
-
-                _ ->
-                    Nothing
-
 
 
 references :: FilePath -> Watchtower.Editor.PointLocation -> IO [(FilePath, Ann.Region)]
 references root point = do
-    definition <- findDefinition2 root point
+    definition <- findDefinition root point
+    project <- Ext.CompileProxy.loadProject root
 
-    maybe (pure []) referencesForDef definition
+    case definition of
+        Just (_, mod, Ext.Dev.Find.Source.FoundValue _ (Ann.At region (Src.Value name _ _ _))) ->
+            referencesForNamedIThink root project mod region (Ann.toValue name)
 
-    where
-        referencesForDef def = do
-            case def of
-                FoundValue mod (Ann.At region (Src.Value name _ _ _)) ->
-                    referencesForNamedIThink mod region (Ann.toValue name)
+        Just (_, mod, Ext.Dev.Find.Source.FoundUnion _ (Ann.At region (Src.Union name _ _))) ->
+            referencesForNamedIThink root project mod region (Ann.toValue name)
 
-                FoundUnion mod (Ann.At region (Src.Union name _ _)) ->
-                    referencesForNamedIThink mod region (Ann.toValue name)
+        Just (_, mod, Ext.Dev.Find.Source.FoundAlias _ (Ann.At region (Src.Alias name _ _))) ->
+            referencesForNamedIThink root project mod region (Ann.toValue name)
 
-                FoundAlias mod (Ann.At region (Src.Alias name _ _)) ->
-                    referencesForNamedIThink mod region (Ann.toValue name)
+        Just (_, mod, Ext.Dev.Find.Source.FoundCtor (Ann.At region name)) ->
+            referencesForNamedIThink root project mod region name
 
-                FoundCtor mod (Ann.At region name) ->
-                    referencesForNamedIThink mod region name
+        Just (_, mod, Ext.Dev.Find.Source.FoundModuleName (Ann.At _ name)) -> do
+            let importers = Ext.Dev.Project.importersOf project name
 
-                FoundModule mod -> do
-                    project <- Ext.CompileProxy.loadProject root
+            (mod : Set.toList importers)
+              & Control.Monad.foldM (\acc a -> do
+                let maybePath = Ext.Dev.Project.lookupModulePath project a
 
-                    let importers = Ext.Dev.Project.importersOf project mod
+                case maybePath of
+                  Nothing -> pure acc
+                  Just path -> do
+                    loadedFile <- Ext.CompileProxy.parse root path
 
-                    Control.Monad.foldM
-                        (\acc modName -> do
-                            case Ext.Dev.Project.lookupModulePath project modName of
-                                Nothing ->
-                                    pure acc
+                    case loadedFile of
+                      Left _ -> pure acc
+                      Right (Src.Module _ _ _ imports _ _ _ _ _) -> do
+                         imports
+                           & find (\(Src.Import (Ann.At _ importName) _ _)  -> importName == name)
+                           & maybe acc (\(Src.Import (Ann.At region _) _ _)  -> ( path, region) : acc)
+                           & pure
+              )
+              []
 
-                                Just path -> do
-                                    pure (acc ++ [ (path, Ann.one) ])
-                        )
-                        []
-                        (mod : Set.toList importers)
+        _ ->
+          pure []
 
-        referencesForNamedIThink mod defRegion defName = do
-            project <- Ext.CompileProxy.loadProject root
 
-            let importers = Ext.Dev.Project.importersOf project mod
+referencesForNamedIThink :: 
+  FilePath 
+  -> Elm.Details.Details
+  -> ModuleName.Raw 
+  -> Ann.Region
+  -> Name
+  -> IO [(FilePath, Ann.Region)]
+referencesForNamedIThink root project mod defRegion defName = do
+    let importers = Ext.Dev.Project.importersOf project mod
 
-            Control.Monad.foldM
-                (\acc modName -> do
-                    case Ext.Dev.Project.lookupModulePath project modName of
-                        Nothing ->
-                            pure acc
-                        Just path -> do
-                            Control.Exception.catch
-                                (Ext.CompileProxy.parse root path
-                                  & fmap
-                                      (\result ->
-                                          case result of
-                                              Left _ ->
-                                                  acc
+    (mod : Set.toList importers)
+      & Control.Monad.foldM (\acc modName -> do
+        case Ext.Dev.Project.lookupModulePath project modName of
+            Nothing -> pure acc
+            Just path -> do
+                result <- Control.Exception.try (Ext.CompileProxy.parse root path) 
+                  :: IO (
+                       Either Control.Exception.SomeException 
+                         (Either Reporting.Error.Syntax.Error Src.Module)
+                     )
 
-                                              Right srcModule -> do
-                                                  let found = Ext.Dev.Find.Source.references mod defName srcModule
-                                                  case found of
-                                                      [] ->
-                                                          acc
+                pure $ case result of
+                  Right (Right srcModule) -> do
+                    let found = Ext.Dev.Find.Source.references mod defName srcModule
+                    case found of
+                      [] -> acc
+                      _ -> acc ++ [ (path, region) | region <- found ]
+                  _ -> acc
+        )
+        []
 
-                                                      _ ->
-                                                          (acc ++ [ (path, region) | region <- found ])
-                                      )
-                                )
-                                handle
-
-                                where
-                                    handle :: Control.Exception.SomeException -> IO [(FilePath, Ann.Region)]
-                                    handle _ = pure acc
-                )
-                []
-                (mod : Set.toList importers)
 
 
 sendCreateWorkDoneProgress :: String -> IO ()
@@ -904,25 +751,6 @@ recompile (State mProjects) changedFile = do
           cacheUpdatePrevPublishedDiagnosticsFiles cache (\_ -> publishedDiagnosticsFiles)
           cacheUpdatePublishedDiagnosticsFiles cache (\_ -> [])
 
-          sendNotification "window/logMessage"
-                (Aeson.object
-                  [ "type" Aeson..= (1 :: Int)
-                  , "message" Aeson..= ("prev: " <> show prevPublishedDiagnosticsFiles)
-                  ]
-                )
-          sendNotification "window/logMessage"
-                (Aeson.object
-                  [ "type" Aeson..= (1 :: Int)
-                  , "message" Aeson..= ("curr: " <> show publishedDiagnosticsFiles)
-                  ]
-                )
-          sendNotification "window/logMessage"
-                (Aeson.object
-                  [ "type" Aeson..= (1 :: Int)
-                  , "message" Aeson..= ("diff: " <> show diff)
-                  ]
-                )
-
           pure ()
         )
         affectedProjects
@@ -986,12 +814,7 @@ recompileFile top remain projCache@(ProjectCache proj@(Ext.Dev.Project.Project r
                 (e : es)
 
             ExitHelp.Report title maybePath message ->
-              sendNotification "window/showMessage"
-                (Aeson.object
-                  [ "type" Aeson..= (1 :: Int)
-                  , "message" Aeson..= ExitHelp.toString (ExitHelp.reportToDoc report)
-                  ]
-                )
+              showMessage MessageTypeError (ExitHelp.toString (ExitHelp.reportToDoc report))
 
 publishReportDiagnostic :: FilePath -> Int -> [Report.Report] -> IO ()
 publishReportDiagnostic filePath severity reports =
@@ -1087,3 +910,37 @@ messageHeaderParser = messageHeaderParserHelp 0
       _ <- Parsec.anyChar
       messageHeaderParserHelp (i + 1)
 
+logMessage :: MessageType -> String -> IO ()
+logMessage messageType message =
+  sendNotification "window/logMessage"
+    (Aeson.object
+      [ "type" Aeson..= messageTypeToValue messageType
+      , "message" Aeson..= message
+      ]
+    )
+
+showMessage :: MessageType -> String -> IO ()
+showMessage messageType message =
+  sendNotification "window/showMessage"
+    (Aeson.object
+      [ "type" Aeson..= messageTypeToValue messageType
+      , "message" Aeson..= message
+      ]
+    )
+
+data MessageType
+  = MessageTypeError
+  | MessageTypeWarning
+  | MessageTypeInfo
+  | MessageTypeLog
+  | MessageTypeDebug
+  deriving (Show)
+
+messageTypeToValue :: MessageType -> Int
+messageTypeToValue messageType =
+  case messageType of
+    MessageTypeError -> 1
+    MessageTypeWarning -> 2
+    MessageTypeInfo -> 3
+    MessageTypeLog -> 4
+    MessageTypeDebug -> 5
