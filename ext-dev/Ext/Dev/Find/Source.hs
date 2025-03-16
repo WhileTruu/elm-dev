@@ -407,20 +407,13 @@ potentialImportSourcesForName name =
     List.filter
         (\(Src.Import (A.At _ importName) alias exposing) ->
             case exposing of
-                Src.Open ->
-                    -- FIXME: should be True, if it exposes everything,
-                    -- the name is potentially from there
-                    False
-
+                Src.Open -> True
                 Src.Explicit exposed ->
                     List.any
                         (\a ->
                             case a of
-                                Src.Upper (A.At _ uname) privacy ->
-                                    name == uname
-
-                                _ ->
-                                    False
+                                Src.Upper (A.At _ uname) privacy -> name == uname
+                                _ -> False
                        )
                        exposed
         )
@@ -476,7 +469,7 @@ refineExprMatch srcMod@(Src.Module _ _ _ imports _ _ _ _ _) point foundPatterns 
         Src.Float _ ->
             Nothing
 
-        Src.Var _ name ->
+        Src.Var _ name -> do
             (find (findPatternIntroducing name) foundPatterns & fmap FoundPattern)
                 <|> definitionNamed name srcMod
                 <|> (case potentialImportSourcesForName name imports of
