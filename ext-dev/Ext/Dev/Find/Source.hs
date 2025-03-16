@@ -462,9 +462,7 @@ findExpr srcMod point foundPatterns expr@(A.At region _) =
 
 
 refineExprMatch :: Src.Module -> A.Position -> [Src.Pattern] -> Src.Expr -> Maybe Found
-refineExprMatch srcMod@(Src.Module _ _ _ imports _ _ _ _ _) point foundPatterns (A.At _ expr_) = do
-    traceShow expr_ (pure ())
-
+refineExprMatch srcMod@(Src.Module _ _ _ imports _ _ _ _ _) point foundPatterns (A.At _ expr_) =
     case expr_ of
         Src.Chr _ ->
             Nothing
