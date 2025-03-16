@@ -118,7 +118,10 @@ getRoot :: FilePath -> State -> IO (Maybe FilePath)
 getRoot path (State mProjects) =
   do
     projects <- STM.readTVarIO mProjects
-    pure (getRootHelp path projects Nothing)
+    let maybeRoot = getRootHelp path projects Nothing
+    case maybeRoot of
+      Just root -> pure (Just root)
+      Nothing -> Dir.withCurrentDirectory (Path.takeDirectory path) Stuff.findRoot
 
 
 getRootHelp path projects found =
@@ -152,6 +155,7 @@ discoverProjects root = do
   let projectTails = fmap (getProjectShorthand root) projects
   Ext.Log.log Ext.Log.Live (("👁️  found projects\n" ++ root) <> formatList projectTails)
   Monad.foldM initializeProject [] projects
+
 
 getProjectShorthand :: FilePath -> Ext.Dev.Project.Project -> FilePath
 getProjectShorthand root proj =
@@ -471,14 +475,25 @@ handleRequest state@(State mProjects) request =
 
 findDefinition :: FilePath -> Watchtower.Editor.PointLocation -> IO (Maybe (FilePath, ModuleName.Raw, Ext.Dev.Find.Source.Found))
 findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
-    result <- Ext.CompileProxy.parse root path
+    details <- Ext.CompileProxy.loadProject root
+
+    let loadLocal path_ = case Elm.Details._outline details of
+                            Elm.Details.ValidApp _ -> Ext.CompileProxy.parse root path_
+                            Elm.Details.ValidPkg pkgName _ _ -> do
+                              loadedFile <- Ext.CompileProxy.loadPkgFileSource pkgName root path_
+                              case loadedFile of
+                                Left err -> pure $ Left err
+                                Right (_, srcModule) -> pure (Right srcModule)
+
+    result <- loadLocal path
 
     case result of
       Right srcModule -> do
           case Ext.Dev.Find.Source.definitionAtPoint point srcModule of
             Nothing -> pure Nothing
 
-            Just found@(Ext.Dev.Find.Source.FoundExternalOpts imports name) ->
+            Just found@(Ext.Dev.Find.Source.FoundExternalOpts imports name) -> do
+              -- FIXME: add hack for List? - no type exists in the core module
               Control.Monad.foldM
                   (\acc mod ->
                    case acc of
@@ -490,8 +505,6 @@ findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
 
 
             Just found@(Ext.Dev.Find.Source.FoundImport (Src.Import (Ann.At _ mod) _ _)) -> do
-                  details <- Ext.CompileProxy.loadProject root
-
                   case Ext.Dev.Project.lookupModulePath details mod of
                     Nothing -> do
                       case Ext.Dev.Project.lookupPkgName details mod of
@@ -523,7 +536,7 @@ findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
                                         Nothing -> Nothing
 
                     Just path -> do
-                      loadedFile <- Ext.CompileProxy.parse root path
+                      loadedFile <- loadLocal path
                       pure $ case loadedFile of
                         Left _ -> Nothing
                         Right modul@(Src.Module maybeName _ _ _ _ _ _ _ _) ->
@@ -537,10 +550,13 @@ findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
 
                             Nothing -> Nothing
 
-            Just found -> do
+            Just found ->
               pure (Just (path, Src.getName srcModule, found))
 
-      Left _  ->
+      Left err  -> do
+          source <- File.readUtf8 path
+          logMessage MessageTypeError (ExitHelp.toString (Reporting.Report._message (Reporting.Error.Syntax.toReport (Code.toSource source) err)))
+
           pure Nothing
 
 

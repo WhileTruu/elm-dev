@@ -705,12 +705,16 @@ referenceNamed import_ name srcMod@(Src.Module _ _ _ imports values _ _ _ _) =
 
 
 namedInValue :: Src.Import -> Name -> A.Located Src.Value -> [A.Region]
-namedInValue import_ name (A.At _ (Src.Value _ _ expr type_)) =
-    namedInExpr import_ name [] expr
-        ++ (case type_ of
-            Just tipe -> namedInType import_ name [] tipe
-            Nothing -> []
-           )
+namedInValue import_ name (A.At _ (Src.Value _ patterns expr type_)) =
+    if any (\a -> Maybe.isJust (findPatternIntroducing name a)) patterns then
+        []
+
+    else
+        namedInExpr import_ name [] expr
+            ++ (case type_ of
+                Just tipe -> namedInType import_ name [] tipe
+                Nothing -> []
+               )
 
 namedInExpr :: Src.Import -> Name -> [A.Region] -> Src.Expr -> [A.Region]
 namedInExpr import_ name foundRegions (A.At region expr_) =
@@ -842,12 +846,16 @@ namedInExpr import_ name foundRegions (A.At region expr_) =
             List.foldl
                 (\foundRegions (A.At _ def_) ->
                     case def_ of
-                        Src.Define (A.At _ name_) _ expr_ type_ ->
-                            namedInExpr import_ name foundRegions expr_
-                                ++ (case type_ of
-                                        Just tipe -> namedInType import_ name [] tipe
-                                        Nothing -> []
-                                   )
+                        Src.Define (A.At _ name_) patterns expr_ type_ ->
+                            if any (\a -> Maybe.isJust (findPatternIntroducing name a)) patterns then
+                                []
+
+                            else
+                                namedInExpr import_ name foundRegions expr_
+                                    ++ (case type_ of
+                                            Just tipe -> namedInType import_ name [] tipe
+                                            Nothing -> []
+                                       )
 
                         Src.Destruct pattern expr_ ->
                             namedInExpr import_ name foundRegions expr_
