@@ -1,7 +1,9 @@
 
 # Wishlist for the language server
 
-- [ ] [telescope.builtin.lsp_*]: server does not support textDocument/documentSymbol
+- [x] [telescope.builtin.lsp_*]: server does not support textDocument/documentSymbol
+- [ ] [telescope.builtin.lsp_*]: server does not support textDocument/hover
+- [ ] [telescope.builtin.lsp_*]: textDocument/codeAction for add type annotation
 
 # Elm Dev
 

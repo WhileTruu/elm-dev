@@ -10,6 +10,7 @@ module Ext.Dev.Find.Source
   , symbols
   , encodeFoundAsLspDocumentSymbols
   , foundRegion
+  , foundHoverInfoRegion
   )
 where
 
@@ -1138,6 +1139,22 @@ foundRegion found =
     FoundValue _ (A.At region _) -> Just region
     FoundUnion _ (A.At _ (Src.Union (A.At region _) _ _)) -> Just region
     FoundAlias _ (A.At _ (Src.Alias (A.At region _) _ _)) -> Just region
+    FoundCtor (A.At region _) -> Just region
+    FoundTVar (A.At region _) -> Just region
+    FoundPattern (A.At region _) -> Just region
+    FoundDef (Src.Define (A.At region _) _ _ _) -> Just region
+    FoundDef (Src.Destruct (A.At region _) _) -> Just region
+    FoundExternalOpts _ _ -> Nothing
+    FoundImport (Src.Import (A.At region _) _ _) -> Just region
+    FoundModuleName (A.At region _) -> Just region
+
+foundHoverInfoRegion :: Found -> Maybe A.Region 
+foundHoverInfoRegion found =
+  case found of
+    FoundValue _ (A.At region _) -> Just region
+    FoundUnion _ (A.At region _) -> Just region
+    FoundAlias _ (A.At (A.Region start _) (Src.Alias (A.At (A.Region _ end) _) _ _)) -> 
+      Just (A.Region start end)
     FoundCtor (A.At region _) -> Just region
     FoundTVar (A.At region _) -> Just region
     FoundPattern (A.At region _) -> Just region

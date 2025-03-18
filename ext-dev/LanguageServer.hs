@@ -15,6 +15,7 @@ import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.ByteString.Builder
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as LB
+import qualified Data.ByteString.UTF8 as UTF8_BS
 import qualified Data.Foldable
 import Data.List as List
 import Data.Maybe as Maybe
@@ -229,6 +230,11 @@ data Request
   | DocumentSymbol {reqId :: Int, filePath :: FilePath}
   | DidSave {filePath :: FilePath}
   | DidOpen {filePath :: FilePath}
+  | Hover 
+    { reqId :: Int
+    , filePath :: FilePath
+    , position :: Ann.Position
+    }
   deriving (Show, Generics.Generic)
 
 data Position = Position
@@ -317,6 +323,22 @@ instance Aeson.FromJSON Request where
 
         pure $ DidOpen filePath
 
+      "textDocument/hover" -> do
+        params <- v .: "params"
+
+        textDocument <- params .: "textDocument"
+        uri <- textDocument .: "uri"
+        let filePath = drop 7 uri
+
+        position <- params .: "position"
+        let row = fromIntegral $ line position
+        let col = fromIntegral $ character position
+
+        Hover
+          <$> v .: "id"
+          <*> pure filePath
+          <*> pure (Ann.Position (row + 1) (col + 1))
+
       _ -> fail "Unknown method"
 
 
@@ -334,6 +356,9 @@ handleRequest state@(State mProjects) request =
                 , "openClose" Aeson..= True
                 ]
             , "referencesProvider" Aeson..= Aeson.object
+              [ "workDoneProgress" Aeson..= True
+              ]
+            , "hoverProvider" Aeson..= Aeson.object
               [ "workDoneProgress" Aeson..= True
               ]
             ]
@@ -472,6 +497,83 @@ handleRequest state@(State mProjects) request =
 
       sendProgressEnd "compile-progress"
 
+    Hover { reqId = reqId, filePath = filePath, position = position } -> do
+      sendCreateWorkDoneProgress "hover-progress"
+      sendProgressBegin "hover-progress" "🔍 Finding hover"
+      
+      let location = Watchtower.Editor.PointLocation filePath position
+      root <- fmap (Maybe.fromMaybe ".") (getRoot filePath state)
+
+      pathAndPos <- findDefinition root location
+
+      case pathAndPos >>= (\(path, moduleName, found) -> Ext.Dev.Find.Source.foundHoverInfoRegion found & fmap (\a -> (path, moduleName, a)) ) of
+        Nothing -> do
+          sendProgressEnd "hover-progress"
+          respondErr reqId "Hover not found"
+
+        Just (path, moduleName, region@(Ann.Region (Ann.Position sr sc) (Ann.Position er ec))) ->
+          do
+            source <- File.readUtf8 path
+            let allLines = lines (UTF8_BS.toString source) ++ [""]
+            let commentStartRow = if "-}" `isSuffixOf` (allLines !! fromIntegral (sr - 2)) 
+                             then findStartOfComment (fromIntegral sr) allLines
+                             else fromIntegral sr
+            
+            let commentLines = allLines
+                              & drop (commentStartRow - 1)
+                              & take (fromIntegral sr - commentStartRow)
+                              & intercalate "\n"
+
+            let codeLines = allLines
+                              & drop (fromIntegral (sr - 1))
+                              & take (fromIntegral (1 +  er - sr))
+                              & intercalate "\n"
+
+
+            sendProgressBegin "hover-progress" ("🔍 Found hover: " ++ show region)
+            sendProgressEnd "hover-progress" 
+            respond reqId $
+              Aeson.object
+                [ "contents" Aeson..= Aeson.object
+                  [ "kind" Aeson..= ("markdown" :: String)
+                  , "value" Aeson..= (
+                      "```elm\n" 
+                        ++ codeLines 
+                        ++ "\n```\n\n" 
+                        ++ "_Defined in `" ++ ModuleName.toChars moduleName ++ "`"
+                        ++ " at `" ++ path ++ "`_"
+                        ++ "\n\n"
+                        ++ commentLines
+                             & drop 3
+                             & take (length commentLines - 5)
+                             & (T.unpack . T.strip . T.pack) -- trim whitespace
+                        ++ "\n\n"
+                      :: String
+                    )
+                  ]
+                  -- "range"
+                  --   Aeson..= Aeson.object
+                  --     [ "start"
+                  --         Aeson..= Aeson.object
+                  --           [ "line" Aeson..= (sr - 1),
+                  --             "character" Aeson..= (sc - 1)
+                  --           ],
+                  --       "end"
+                  --         Aeson..= Aeson.object
+                  --           [ "line" Aeson..= (er - 1),
+                  --             "character" Aeson..= (ec - 1)
+                  --           ]
+                  --     ]
+                ]
+
+findStartOfComment :: Int -> [String] -> Int
+findStartOfComment sr lines =
+    let isCommentStart line = "{-|" `isPrefixOf` line
+        go n
+          | n <= 0 = 1  -- Stop at the first line
+          | isCommentStart (lines !! (n - 1)) = n
+          | otherwise = go (n - 1)
+    in go sr
 
 findDefinition :: FilePath -> Watchtower.Editor.PointLocation -> IO (Maybe (FilePath, ModuleName.Raw, Ext.Dev.Find.Source.Found))
 findDefinition root point@(Watchtower.Editor.PointLocation path _) = do
